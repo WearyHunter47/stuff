@@ -1,0 +1,176 @@
+--// long, long list of variables
+local UIS= game:GetService("UserInputService")
+local Player = game:GetService("Players").LocalPlayer
+local RealCharacter = Player.Character or Player.CharacterAdded:Wait()
+local W = false
+local A = false
+local S = false
+local D = falselocal wtap = false
+local atap = false
+local stap = false
+local dtap = false
+local tpstudX = 3
+local tpstudZ = 3
+local trans = 0.85
+local flow = 50
+local plr = game.Players.LocalPlayer
+local char  = plr.Character
+local normalgravity = game.Workspace.Gravity
+local root = char:WaitForChild("HumanoidRootPart")
+--// even longer, longer list of functions
+local function WDash()
+local FakeCharacter = RealCharacter:Clone() 
+RealCharacter.Archivable = true 
+FakeCharacter.Parent = workspace 
+FakeCharacter.Name = "." 
+FakeCharacter.HumanoidRootPart.CFrame = RealCharacter.HumanoidRootPart.CFrame * CFrame.new(0, 0, 0) 
+for i, v in pairs(FakeCharacter:GetDescendants()) do          
+if v:IsA("BasePart") and v.Name ~= "HumanoidRootPart" then              
+v.Transparency = trans                       
+end 
+end 
+if W then 
+game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame = game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame * CFrame.new(0, 0, -tpstudZ); 
+end 
+task.wait(0.5) 
+FakeCharacter:Destroy()
+end
+
+local function ADash()
+local FakeCharacter = RealCharacter:Clone() 
+RealCharacter.Archivable = true 
+FakeCharacter.Parent = workspace FakeCharacter.Name = "." 
+FakeCharacter.HumanoidRootPart.CFrame = RealCharacter.HumanoidRootPart.CFrame * CFrame.new(0, 0, 0) 
+for i, v in pairs(FakeCharacter:GetDescendants()) do          
+if v:IsA("BasePart") and v.Name ~= "HumanoidRootPart" then              
+v.Transparency = trans                       
+end 
+end 
+if A then 
+game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame = game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame * CFrame.new(-tpstudX, 0, 0); 
+end 
+task.wait(0.5) 
+FakeCharacter:Destroy()
+end
+
+local function SDash()
+local FakeCharacter = RealCharacter:Clone() 
+RealCharacter.Archivable = true 
+FakeCharacter.Parent = workspace 
+FakeCharacter.Name = "." 
+FakeCharacter.HumanoidRootPart.CFrame = RealCharacter.HumanoidRootPart.CFrame * CFrame.new(0, 0, 0) 
+for i, v in pairs(FakeCharacter:GetDescendants()) do          
+if v:IsA("BasePart") and v.Name ~= "HumanoidRootPart" then              
+v.Transparency = trans                       
+end 
+end 
+if S then 
+game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame = game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame * CFrame.new(0, 0, tpstudZ); 
+end 
+task.wait(0.5) 
+FakeCharacter:Destroy()
+end
+
+local function DDash()
+local FakeCharacter = RealCharacter:Clone() 
+RealCharacter.Archivable = true 
+FakeCharacter.Parent = workspace 
+FakeCharacter.Name = "." 
+FakeCharacter.HumanoidRootPart.CFrame = RealCharacter.HumanoidRootPart.CFrame * CFrame.new(0, 0, 0) 
+for i, v in pairs(FakeCharacter:GetDescendants()) do          
+if v:IsA("BasePart") and v.Name ~= "HumanoidRootPart" then              
+v.Transparency = trans                       
+end 
+end 
+if D then 
+game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame = game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame * CFrame.new(tpstudX, 0, 0); 
+end 
+task.wait(0.5) 
+FakeCharacter:Destroy()
+end
+
+local function Dash() 
+local FakeCharacter = RealCharacter:Clone() 
+RealCharacter.Archivable = true 
+FakeCharacter.Parent = workspace 
+FakeCharacter.Name = "." 
+FakeCharacter.HumanoidRootPart.CFrame = RealCharacter.HumanoidRootPart.CFrame * CFrame.new(0, 0, 0) 
+for i, v in pairs(FakeCharacter:GetDescendants()) do          
+if v:IsA("BasePart") and v.Name ~= "HumanoidRootPart" then              
+v.Transparency = trans                       
+end 
+end 
+if W then 
+game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame = game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame * CFrame.new(0, 0, -tpstudZ); 
+elseif A then
+game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame = game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame * CFrame.new(-tpstudX, 0, 0); 
+elseif S then 
+game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame = game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame * CFrame.new(0, 0, tpstudZ); 
+elseif D then 
+game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame = game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame * CFrame.new(tpstudX, 0, 0); 
+else 
+game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame = game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame * CFrame.new(0, 0, -tpstudZ); 
+end  
+task.wait(0.5) 
+FakeCharacter:Destroy()
+end
+
+local function jump() 
+local bv = Instance.new("BodyVelocity",char:WaitForChild("Head"))
+bv.Velocity = root.CFrame.LookVector*flow*2+Vector3.new(0,flow*1.33,0)
+bv.MaxForce = Vector3.new(10,999999,10)
+bv.P = 99999999999999                
+game.Workspace.Gravity = 0
+wait(0.001)
+bv:Destroy()
+wait(0.1)                
+game.Workspace.Gravity = normalgravity
+end
+
+local function wdash() 
+local bv = Instance.new("BodyVelocity",char:WaitForChild("Head"))
+bv.Velocity = root.CFrame.LookVector*flow*2+Vector3.new(0,flow/2,0)
+bv.MaxForce = Vector3.new(25000,0,25000)
+bv.P = 9999999999999                
+game.Workspace.Gravity = 0
+wait(0.001)
+bv:Destroy()
+wait(0.2)            
+game.Workspace.Gravity = normalgravity
+end
+
+local function adash() 
+local bv = Instance.new("BodyVelocity",char:WaitForChild("Head"))
+bv.Velocity = root.CFrame.RightVector*-flow*2+Vector3.new(0,flow/2,0)
+bv.MaxForce = Vector3.new(25000,0,25000)
+bv.P = 9999999999999                
+game.Workspace.Gravity = 0
+wait(0.001)
+bv:Destroy()
+wait(0.2)                
+game.Workspace.Gravity = normalgravity
+end
+
+local function sdash() 
+local bv = Instance.new("BodyVelocity",char:WaitForChild("Head"))
+bv.Velocity = root.CFrame.LookVector*-flow*2+Vector3.new(0,flow/2,0)
+bv.MaxForce = Vector3.new(25000,0,25000)
+bv.P = 9999999999999                
+game.Workspace.Gravity = 0
+wait(0.001)
+bv:Destroy()
+wait(0.2)                
+game.Workspace.Gravity = normalgravity
+end
+
+local function ddash() 
+local bv = Instance.new("BodyVelocity",char:WaitForChild("Head"))
+bv.Velocity = root.CFrame.RightVector*flow*2+Vector3.new(0,flow/2,0)
+bv.MaxForce = Vector3.new(25000,0,25000)
+bv.P = 9999999999999
+game.Workspace.Gravity = 0
+wait(0.001)
+bv:Destroy()
+wait(0.2)
+game.Workspace.Gravity = normalgravity
+end
