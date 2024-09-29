@@ -1,22 +1,29 @@
 --// long, long list of variables
-local UIS= game:GetService("UserInputService")
+local UIS = game:GetService("UserInputService")
 local Player = game:GetService("Players").LocalPlayer
 local RealCharacter = Player.Character or Player.CharacterAdded:Wait()
-local W = false
-local A = false
-local S = false
-local D = falselocal wtap = false
-local atap = false
-local stap = false
-local dtap = false
-local tpstudX = 3
-local tpstudZ = 3
-local trans = 0.85
-local flow = 50
 local plr = game.Players.LocalPlayer
 local char  = plr.Character
 local normalgravity = game.Workspace.Gravity
 local root = char:WaitForChild("HumanoidRootPart")
+local W = false
+local A = false
+local S = false
+local D = false
+local wtap = false
+local atap = false
+local stap = false
+local dtap = false
+--// actual options here
+local direction = false
+local tpdash = true
+local realdash = false
+local wasddash = false
+local tpstudX = 3
+local tpstudZ = 3
+local trans = 0.85
+local flow = 50
+
 --// even longer, longer list of functions
 local function WDash()
 local FakeCharacter = RealCharacter:Clone() 
@@ -29,9 +36,9 @@ if v:IsA("BasePart") and v.Name ~= "HumanoidRootPart" then
 v.Transparency = trans                       
 end 
 end 
-if W then 
+
 game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame = game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame * CFrame.new(0, 0, -tpstudZ); 
-end 
+
 task.wait(0.5) 
 FakeCharacter:Destroy()
 end
@@ -46,9 +53,9 @@ if v:IsA("BasePart") and v.Name ~= "HumanoidRootPart" then
 v.Transparency = trans                       
 end 
 end 
-if A then 
+ 
 game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame = game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame * CFrame.new(-tpstudX, 0, 0); 
-end 
+
 task.wait(0.5) 
 FakeCharacter:Destroy()
 end
@@ -172,19 +179,113 @@ game.Workspace.Gravity = 0
 wait(0.001)
 bv:Destroy()
 wait(0.2)
+end
 
 local function RealDash() 
-if W then
-wdash()
-elseif A then
-adash()
-elseif S then
-sdash()
-elseif D then
-ddash()
-else
-wdash()
+ if W then
+ wdash()
+ elseif A then
+ adash()
+ elseif S then
+ sdash()
+ elseif D then
+ ddash()
+ else
+ wdash()
+ end
+
+ game.Workspace.Gravity = normalgravity
+end
+--// real shit
+UIS.InputBegan:Connect(    
+function(input,gamestuff)    
+if gamestuff then return end        
+if input.KeyCode == Enum.KeyCode.Q then
+    print("Q pressed")
+    if tpdash and direction then
+	    Dash()
+    elseif tpdash and not direction then
+	    WDash()
+	elseif realdash and direction then
+		RealDash()
+	elseif realdash and not direction then
+		wdash()
 end
 end
-game.Workspace.Gravity = normalgravity
+end)
+
+UIS.InputBegan:Connect(    
+function(input)        
+if input.KeyCode == Enum.KeyCode.W then        
+print("W pressed")        
+W = true
+if wasddash then        
+if wtap == false then            
+wtap = true            
+task.wait(0.2)            
+wtap = false        
+else            
+wdash()        
+end            
 end
+end        
+if input.KeyCode == Enum.KeyCode.A 
+then        
+print("A pressed")        
+A = true
+if wasddash then        
+if atap == false then            
+atap = true            
+task.wait(0.2)            
+atap = false        
+else           
+adash()      
+end            
+end 
+end       
+if input.KeyCode == Enum.KeyCode.S then        
+print("S pressed")        
+S = true 
+if wasddash then       
+if stap == false then           
+stap = true            
+task.wait(0.2)            
+stap = false        
+else            
+sdash()        
+end            
+end   
+end     
+if input.KeyCode == Enum.KeyCode.D then        
+print("D pressed")        
+D = true   
+if wasddash then     
+if dtap == false then           
+dtap = true            
+task.wait(0.2)            
+dtap = false        
+else            
+ddash()        
+end            
+end 
+end
+end) 
+UIS.InputEnded:Connect(    
+function(input)        
+if input.KeyCode == Enum.KeyCode.W then        
+print("W released")        
+W = false        
+end        
+if input.KeyCode == Enum.KeyCode.A  then        
+print("A released")        
+A = false        
+end        
+if input.KeyCode == Enum.KeyCode.S  then        
+print("S released")        
+S = false        
+end        
+if input.KeyCode == Enum.KeyCode.D  then        
+print("D released")        
+D = false        
+end
+end)
