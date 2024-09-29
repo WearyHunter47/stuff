@@ -172,5 +172,19 @@ game.Workspace.Gravity = 0
 wait(0.001)
 bv:Destroy()
 wait(0.2)
+
+local function RealDash() 
+if W then
+wdash()
+elseif A then
+adash()
+elseif S then
+sdash()
+elseif D then
+ddash()
+else
+wdash()
+end
+end
 game.Workspace.Gravity = normalgravity
 end
