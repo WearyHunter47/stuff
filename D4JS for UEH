@@ -1,0 +1,539 @@
+--// long, long list of variables
+local UIS = game:GetService("UserInputService")
+ local RunService = game:GetService("RunService")
+ local Player = game:GetService("Players").LocalPlayer
+ local RealCharacter = Player.Character or Player.CharacterAdded:Wait()
+ local plr = game.Players.LocalPlayer
+ local char  = plr.Character
+ local normalgravity = game.Workspace.Gravity
+ local root = char:WaitForChild("HumanoidRootPart")
+ local W = false
+ local A = false
+ local S = false
+ local D = false
+ local wtap = false
+ local atap = false
+ local stap = false
+ local dtap = false
+ local character = game:GetService("Players").LocalPlayer.Character or Player.CharacterAdded:Wait()
+ local humanoid = character.Humanoid
+local jumpTick = tick()
+
+
+--// actual options here
+local Keybind = "Q"
+ local direction = true
+ local tpdash = false
+ local realdash = true
+ local wasddash = true
+ local afterimage = true
+ local platform = true
+ 
+ local tpstudX = 3
+ local tpstudZ = 3
+ local jumps = 0
+ local maxJumps = 2
+ local trans = 0.85
+ local flow = 50
+ local xpower = 25000
+ local zpower = 25000
+local ypower = 1000000
+--// even longer, longer list of functions for dashes (Uppercase = TP, lowercase = Real)
+--// Dash() is directional TP dashes, RealDash() is directional real dashes
+local function WDash()
+ 
+ local FakeCharacter = RealCharacter:Clone() 
+ RealCharacter.Archivable = true 
+ FakeCharacter.Parent = workspace 
+ FakeCharacter.Name = "." 
+ FakeCharacter.HumanoidRootPart.CFrame = RealCharacter.HumanoidRootPart.CFrame * CFrame.new(0, 0, 0) 
+ for i, v in pairs(FakeCharacter:GetDescendants()) do          
+ if v:IsA("BasePart") and v.Name ~= "HumanoidRootPart" then              
+ v.Transparency = trans                       
+ end 
+ end
+ for i, v in pairs(FakeCharacter:GetDescendants()) do          
+ if v:IsA("BasePart") and not v.Anchored then              
+ v.Anchored = true                       
+ end 
+ end
+ 
+ game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame = game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame * CFrame.new(0, 0, -tpstudZ); 
+ 
+ task.wait(0.5) 
+ FakeCharacter:Destroy()
+ 
+end
+
+local function ADash()
+ 
+ local FakeCharacter = RealCharacter:Clone() 
+ RealCharacter.Archivable = true 
+ FakeCharacter.Parent = workspace FakeCharacter.Name = "." 
+ FakeCharacter.HumanoidRootPart.CFrame = RealCharacter.HumanoidRootPart.CFrame * CFrame.new(0, 0, 0) 
+ for i, v in pairs(FakeCharacter:GetDescendants()) do          
+ if v:IsA("BasePart") and v.Name ~= "HumanoidRootPart" then              
+ v.Transparency = trans                       
+ end 
+ end
+ for i, v in pairs(FakeCharacter:GetDescendants()) do          
+ if v:IsA("BasePart") and not v.Anchored then              
+ v.Anchored = true                       
+ end 
+ end
+ 
+ game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame = game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame * CFrame.new(-tpstudX, 0, 0); 
+ if afterimage then
+ task.wait(0.5) 
+ FakeCharacter:Destroy()
+ end
+end
+
+local function SDash()
+ 
+ local FakeCharacter = RealCharacter:Clone() 
+ RealCharacter.Archivable = true 
+ FakeCharacter.Parent = workspace 
+ FakeCharacter.Name = "." 
+ FakeCharacter.HumanoidRootPart.CFrame = RealCharacter.HumanoidRootPart.CFrame * CFrame.new(0, 0, 0) 
+ for i, v in pairs(FakeCharacter:GetDescendants()) do          
+ if v:IsA("BasePart") and v.Name ~= "HumanoidRootPart" then              
+ v.Transparency = trans                       
+ end 
+ end
+ for i, v in pairs(FakeCharacter:GetDescendants()) do          
+ if v:IsA("BasePart") and not v.Anchored then              
+ v.Anchored = true                       
+ end 
+ end 
+  
+ game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame = game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame * CFrame.new(0, 0, tpstudZ); 
+  
+ task.wait(0.5) 
+ FakeCharacter:Destroy()
+ 
+end
+
+local function DDash()
+ 
+ local FakeCharacter = RealCharacter:Clone() 
+ RealCharacter.Archivable = true 
+ FakeCharacter.Parent = workspace 
+ FakeCharacter.Name = "." 
+ FakeCharacter.HumanoidRootPart.CFrame = RealCharacter.HumanoidRootPart.CFrame * CFrame.new(0, 0, 0) 
+ for i, v in pairs(FakeCharacter:GetDescendants()) do          
+ if v:IsA("BasePart") and v.Name ~= "HumanoidRootPart" then              
+ v.Transparency = trans                       
+ end 
+ end
+ for i, v in pairs(FakeCharacter:GetDescendants()) do          
+ if v:IsA("BasePart") and not v.Anchored then              
+ v.Anchored = true                       
+ end 
+ end
+ 
+ game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame = game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame * CFrame.new(tpstudX, 0, 0); 
+ 
+ task.wait(0.5) 
+ FakeCharacter:Destroy()
+ 
+end
+
+local function Dash() 
+ 
+ local FakeCharacter = RealCharacter:Clone() 
+ RealCharacter.Archivable = true 
+ FakeCharacter.Parent = workspace 
+ FakeCharacter.Name = "." 
+ FakeCharacter.HumanoidRootPart.CFrame = RealCharacter.HumanoidRootPart.CFrame * CFrame.new(0, 0, 0) 
+ for i, v in pairs(FakeCharacter:GetDescendants()) do          
+ if v:IsA("BasePart") and v.Name ~= "HumanoidRootPart" then              
+ v.Transparency = trans                       
+ end 
+ end
+ 
+ if W then 
+ game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame = game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame * CFrame.new(0, 0, -tpstudZ); 
+ elseif A then
+ game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame = game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame * CFrame.new(-tpstudX, 0, 0); 
+ elseif S then 
+ game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame = game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame * CFrame.new(0, 0, tpstudZ); 
+ elseif D then 
+ game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame = game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame * CFrame.new(tpstudX, 0, 0); 
+ else 
+ game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame = game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame * CFrame.new(0, 0, -tpstudZ); 
+ end
+
+ task.wait(0.5) 
+ FakeCharacter:Destroy()
+ 
+end
+
+local function jump()
+ 
+ local FakeCharacter = RealCharacter:Clone() 
+ RealCharacter.Archivable = true 
+ FakeCharacter.Parent = workspace 
+ FakeCharacter.Name = "." 
+ FakeCharacter.HumanoidRootPart.CFrame = RealCharacter.HumanoidRootPart.CFrame * CFrame.new(0, 0, 0) 
+ for i, v in pairs(FakeCharacter:GetDescendants()) do          
+ if v:IsA("BasePart") and v.Name ~= "HumanoidRootPart" then              
+ v.Transparency = trans                       
+ end 
+ end
+ for i, v in pairs(FakeCharacter:GetDescendants()) do          
+ if v:IsA("BasePart") and not v.Anchored then              
+ v.Anchored = true                       
+ end 
+ end
+ 
+ local bv = Instance.new("BodyVelocity",char:WaitForChild("Head"))
+ bv.Velocity = root.CFrame.LookVector*flow*2+Vector3.new(0,flow*1.33,0)
+ bv.MaxForce = Vector3.new(10,ypower,10)
+ bv.P = 99999999999999                
+ game.Workspace.Gravity = 0
+ wait(0.001)
+ bv:Destroy()
+ wait(0.1)                
+ game.Workspace.Gravity = normalgravity
+ 
+ task.wait(0.3)
+ FakeCharacter:Destroy()
+ 
+end
+
+local function wdash()
+ 
+ local FakeCharacter = RealCharacter:Clone() 
+ RealCharacter.Archivable = true 
+ FakeCharacter.Parent = workspace 
+ FakeCharacter.Name = "." 
+ FakeCharacter.HumanoidRootPart.CFrame = RealCharacter.HumanoidRootPart.CFrame * CFrame.new(0, 0, 0) 
+ for i, v in pairs(FakeCharacter:GetDescendants()) do          
+ if v:IsA("BasePart") and v.Name ~= "HumanoidRootPart" then              
+ v.Transparency = trans                       
+ end 
+ end
+ for i, v in pairs(FakeCharacter:GetDescendants()) do          
+ if v:IsA("BasePart") and not v.Anchored then              
+ v.Anchored = true                       
+ end 
+ end
+ 
+ local bv = Instance.new("BodyVelocity",char:WaitForChild("Head"))
+ bv.Velocity = root.CFrame.LookVector*flow*2+Vector3.new(0,flow/2,0)
+ bv.MaxForce = Vector3.new(xpower,0,zpower)
+ bv.P = 9999999999999                
+ game.Workspace.Gravity = 0
+ wait(0.001)
+ bv:Destroy()
+ wait(0.2)            
+ game.Workspace.Gravity = normalgravity
+ 
+ FakeCharacter:Destroy()
+ 
+end
+
+local function adash() 
+ 
+ local FakeCharacter = RealCharacter:Clone() 
+ RealCharacter.Archivable = true 
+ FakeCharacter.Parent = workspace 
+ FakeCharacter.Name = "." 
+ FakeCharacter.HumanoidRootPart.CFrame = RealCharacter.HumanoidRootPart.CFrame * CFrame.new(0, 0, 0) 
+ for i, v in pairs(FakeCharacter:GetDescendants()) do          
+ if v:IsA("BasePart") and v.Name ~= "HumanoidRootPart" then              
+ v.Transparency = trans                       
+ end 
+ end
+ for i, v in pairs(FakeCharacter:GetDescendants()) do          
+ if v:IsA("BasePart") and not v.Anchored then              
+ v.Anchored = true                       
+ end 
+ end
+ 
+ local bv = Instance.new("BodyVelocity",char:WaitForChild("Head"))
+ bv.Velocity = root.CFrame.RightVector*-flow*2+Vector3.new(0,flow/2,0)
+ bv.MaxForce = Vector3.new(xpower,0,zpower)
+ bv.P = 9999999999999                
+ game.Workspace.Gravity = 0
+ wait(0.001)
+ bv:Destroy()
+ wait(0.2)                
+ game.Workspace.Gravity = normalgravity
+ 
+ FakeCharacter:Destroy()
+ 
+end
+
+local function sdash()
+ 
+ local FakeCharacter = RealCharacter:Clone() 
+ RealCharacter.Archivable = true 
+ FakeCharacter.Parent = workspace 
+ FakeCharacter.Name = "." 
+ FakeCharacter.HumanoidRootPart.CFrame = RealCharacter.HumanoidRootPart.CFrame * CFrame.new(0, 0, 0) 
+ for i, v in pairs(FakeCharacter:GetDescendants()) do          
+ if v:IsA("BasePart") and v.Name ~= "HumanoidRootPart" then              
+ v.Transparency = trans                       
+ end 
+ end
+ for i, v in pairs(FakeCharacter:GetDescendants()) do          
+ if v:IsA("BasePart") and not v.Anchored then              
+ v.Anchored = true                       
+ end 
+ end
+ 
+ local bv = Instance.new("BodyVelocity",char:WaitForChild("Head"))
+ bv.Velocity = root.CFrame.LookVector*-flow*2+Vector3.new(0,flow/2,0)
+ bv.MaxForce = Vector3.new(xpower,0,zpower)
+ bv.P = 9999999999999                
+ game.Workspace.Gravity = 0
+ wait(0.001)
+ bv:Destroy()
+ wait(0.2)                
+ game.Workspace.Gravity = normalgravity
+ 
+ FakeCharacter:Destroy()
+ 
+end
+
+local function ddash()
+ 
+ local FakeCharacter = RealCharacter:Clone() 
+ RealCharacter.Archivable = true 
+ FakeCharacter.Parent = workspace 
+ FakeCharacter.Name = "." 
+ FakeCharacter.HumanoidRootPart.CFrame = RealCharacter.HumanoidRootPart.CFrame * CFrame.new(0, 0, 0) 
+ for i, v in pairs(FakeCharacter:GetDescendants()) do          
+ if v:IsA("BasePart") and v.Name ~= "HumanoidRootPart" then              
+ v.Transparency = trans                       
+ end 
+ end
+ for i, v in pairs(FakeCharacter:GetDescendants()) do          
+ if v:IsA("BasePart") and not v.Anchored then              
+ v.Anchored = true                       
+ end 
+ end
+ 
+ local bv = Instance.new("BodyVelocity",char:WaitForChild("Head"))
+ bv.Velocity = root.CFrame.RightVector*flow*2+Vector3.new(0,flow/2,0)
+ bv.MaxForce = Vector3.new(xpower,0,zpower)
+ bv.P = 9999999999999
+ game.Workspace.Gravity = 0
+ wait(0.001)
+ bv:Destroy()
+ wait(0.2)
+ game.Workspace.Gravity = normalgravity
+ 
+ FakeCharacter:Destroy()
+ 
+end
+
+local function RealDash() 
+ if W then
+ wdash()
+ elseif A then
+ adash()
+ elseif S then
+ sdash()
+ elseif D then
+ ddash()
+ else
+ wdash()
+ end
+end
+
+
+UIS.InputBegan:Connect(    
+ function(input)        
+ if input.KeyCode == Enum.KeyCode.W then        
+         
+ if wasddash and realdash then        
+    if platform and wtap and available == true then            
+    local Part = Instance.new("Part", workspace)
+     Part.Anchored = true
+     Part.Size = Vector3.new(2, 0.2, 2)
+     Part.Transparency = 0.95
+     Part.CanCollide = true
+     local FloatValue = -3.1
+     RunService.Heartbeat:Connect(function()
+     Part.CFrame = RealCharacter.HumanoidRootPart.CFrame * CFrame.new(0,FloatValue,0)
+     end)
+	 wait(0.25)
+    Part:Destroy()
+    
+    end
+ end
+ end  
+ if input.KeyCode == Enum.KeyCode.A then        
+         
+ if wasddash and realdash then        
+    if platform and atap and available == true then            
+    local Part = Instance.new("Part", workspace)
+     Part.Anchored = true
+     Part.Size = Vector3.new(2, 0.2, 2)
+     Part.Transparency = 0.95
+     Part.CanCollide = true
+     local FloatValue = -3.1
+     RunService.Heartbeat:Connect(function()
+     Part.CFrame = RealCharacter.HumanoidRootPart.CFrame * CFrame.new(0,FloatValue,0)
+     end)
+	 wait(0.25)
+    Part:Destroy()
+    
+    end
+ end
+ end
+ if input.KeyCode == Enum.KeyCode.S then        
+         
+ if wasddash and realdash then        
+    if platform and stap and available == true then            
+    local Part = Instance.new("Part", workspace)
+     Part.Anchored = true
+     Part.Size = Vector3.new(2, 0.2, 2)
+     Part.Transparency = 0.95
+     Part.CanCollide = true
+     local FloatValue = -3.1
+     RunService.Heartbeat:Connect(function()
+     Part.CFrame = RealCharacter.HumanoidRootPart.CFrame * CFrame.new(0,FloatValue,0)
+     end)
+	 wait(0.25)
+    Part:Destroy()
+    
+    end
+ end
+ end
+ if input.KeyCode == Enum.KeyCode.D then        
+         
+ if wasddash and realdash then        
+    if platform and dtap and available == true then            
+    local Part = Instance.new("Part", workspace)
+     Part.Anchored = true
+     Part.Size = Vector3.new(2, 0.2, 2)
+     Part.Transparency = 0.95
+     Part.CanCollide = true
+     local FloatValue = -3.1
+     RunService.Heartbeat:Connect(function()
+     Part.CFrame = RealCharacter.HumanoidRootPart.CFrame * CFrame.new(0,FloatValue,0)
+     end)
+	 wait(0.25)
+    Part:Destroy()
+    
+    end
+ end
+ end                            
+end) 
+
+UIS.InputEnded:Connect(    
+ function(input)        
+ if input.KeyCode == Enum.KeyCode.W then        
+         
+ W = false        
+ end        
+ if input.KeyCode == Enum.KeyCode.A then        
+         
+ A = false        
+ end        
+ if input.KeyCode == Enum.KeyCode.S then        
+         
+ S = false        
+ end        
+ if input.KeyCode == Enum.KeyCode.D  then        
+         
+ D = false        
+ end
+end)
+
+UIS.InputBegan:Connect(    
+ function(input)        
+ if input.KeyCode == Enum.KeyCode.W then        
+         
+ W = true
+ if wasddash then        
+ if wtap == false then            
+ wtap = true            
+ task.wait(0.2)            
+ wtap = false        
+ else            
+ wdash()        
+ end            
+ end
+ end        
+ if input.KeyCode == Enum.KeyCode.A 
+ then        
+         
+ A = true
+ if wasddash then        
+ if atap == false then            
+ atap = true            
+ task.wait(0.2)            
+ atap = false        
+ else           
+ adash()      
+ end            
+ end 
+ end       
+ if input.KeyCode == Enum.KeyCode.S then        
+         
+ S = true 
+ if wasddash then       
+ if stap == false then           
+ stap = true            
+ task.wait(0.2)            
+ stap = false        
+ else            
+ sdash()        
+ end            
+ end   
+ end     
+ if input.KeyCode == Enum.KeyCode.D then        
+         
+ D = true   
+ if wasddash then     
+ if dtap == false then           
+ dtap = true            
+ task.wait(0.2)            
+ dtap = false        
+ else            
+ ddash()        
+ end            
+ end 
+ end
+end) 
+
+UIS.InputEnded:Connect(    
+ function(input)        
+ if input.KeyCode == Enum.KeyCode.W then        
+        
+ W = false        
+ end        
+ if input.KeyCode == Enum.KeyCode.A  then        
+        
+ A = false        
+ end        
+ if input.KeyCode == Enum.KeyCode.S  then        
+         
+ S = false        
+ end        
+ if input.KeyCode == Enum.KeyCode.D  then        
+         
+ D = false        
+ end
+end)
+
+humanoid.StateChanged:Connect(function(old, new)
+	if new == Enum.HumanoidStateType.Landed then
+		jumps = 0
+	end
+end)
+
+UIS.JumpRequest:Connect(function()
+	if jumps < maxJumps and tick() - jumpTick > 0.2 then
+		jumpTick = tick()
+		jumps += 1
+	if jumps > 1 then
+		jump()
+	end
+	end
+end)
