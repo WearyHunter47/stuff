@@ -1,0 +1,201 @@
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+local RunService = game:GetService("RunService")
+local COREGUI = cloneref(game:GetService("CoreGui"))
+local lastESPUpdate = {}
+-- settings here
+local espTransparency = 0.8
+local circleTransparency = 0.9 
+local CHMSenabled = true
+local CircleHealth = false
+local CircleRadiusFR = 50 --studs
+local CircleOffset = -2.5 --studs
+local RefreshTime = 60 --seconds, for refreshing every now and then
+local FakeCircleRadius = CircleRadiusFR*2
+-- Helper function to get the player's root part
+local function getRoot(char)
+    return char:FindFirstChild('HumanoidRootPart') or char:FindFirstChild('Torso') or char:FindFirstChild('UpperTorso')
+end
+
+-- Function to create a visible circle under the player's feet
+local function createCircle()
+    local circle = Instance.new("Part")
+    circle.Size = Vector3.new(FakeCircleRadius, FakeCircleRadius, FakeCircleRadius)
+    circle.Anchored = true
+    circle.CanCollide = false
+    circle.Transparency = circleTransparency
+    circle.Color = Color3.fromRGB(255, 255, 255)
+    circle.Name = "PlayerCircle"
+
+    local mesh = Instance.new("CylinderMesh")
+    mesh.Scale = Vector3.new(1, 0, 1) -- Adjust scale to match the circle radius
+    mesh.Parent = circle
+    circle.Parent = workspace
+
+    return circle
+end
+
+-- Update circle position to match the player's position
+local function updateCircle(circle, root, humanoid)
+    if root then
+        circle.Transparency = circleTransparency
+        local offset = Vector3.new(0, CircleOffset, 0)
+        -- Correct orientation: flat circle under player's feet
+        circle.CFrame = CFrame.new(root.Position + offset) * CFrame.Angles(0, 0, 0)
+        if humanoid and CircleHealth then
+            local healthPercentage = humanoid.Health / humanoid.MaxHealth
+            local red = (1 - healthPercentage) * 255
+            local green = healthPercentage * 255
+            circle.Color = Color3.fromRGB(red, green, 0)
+        end
+    end
+end
+
+-- Function to create ESP for a given player
+local function CHMS(plr)
+    task.spawn(function()
+        for _, v in pairs(COREGUI:GetChildren()) do
+            if v.Name == plr.Name .. "_CHMS" then
+                v:Destroy()
+            end
+        end
+
+        if plr.Character and plr.Name ~= LocalPlayer.Name and not COREGUI:FindFirstChild(plr.Name .. "_CHMS") then
+            local ESPholder = Instance.new("Folder")
+            ESPholder.Name = plr.Name .. "_CHMS"
+            ESPholder.Parent = COREGUI
+
+            repeat task.wait(1) until plr.Character and getRoot(plr.Character) and plr.Character:FindFirstChildOfClass("Humanoid")
+
+            for _, n in pairs(plr.Character:GetChildren()) do
+                if n:IsA("BasePart") then
+                    local a = Instance.new("BoxHandleAdornment")
+                    a.Name = plr.Name
+                    a.Parent = ESPholder
+                    a.Adornee = n
+                    a.AlwaysOnTop = true
+                    a.ZIndex = 10
+                    a.Size = n.Size
+                    a.Transparency = espTransparency
+                    a.Color = plr.TeamColor
+                end
+            end
+
+            lastESPUpdate[plr.Name] = tick() -- Track when ESP was last updated
+        end
+    end)
+end
+
+-- Circle generation and ESP color change logic
+local function monitorCircle()
+    local circle = createCircle()
+    local circleRadius = CircleRadiusFR -- 50 studs
+
+    while CHMSenabled do
+        if LocalPlayer.Character and getRoot(LocalPlayer.Character) then
+            local localRoot = getRoot(LocalPlayer.Character)
+            local humanoid = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+            updateCircle(circle, localRoot, humanoid)
+
+            for _, plr in pairs(Players:GetPlayers()) do
+                if plr ~= LocalPlayer and plr.Character and getRoot(plr.Character) then
+                    local plrRoot = getRoot(plr.Character)
+                    local distance = (localRoot.Position - plrRoot.Position).Magnitude
+
+                    local holder = COREGUI:FindFirstChild(plr.Name .. "_CHMS")
+                    if holder then
+                        local humanoid = plr.Character:FindFirstChildOfClass("Humanoid")
+                        if humanoid then
+                            local healthPercentage = humanoid.Health / humanoid.MaxHealth
+                            local red = (1 - healthPercentage) * 255
+                            local green = healthPercentage * 255
+                            local healthColor = Color3.fromRGB(red, green, 0) -- Scale from green to red
+
+                            for _, adornment in pairs(holder:GetChildren()) do
+                                if adornment:IsA("BoxHandleAdornment") then
+                                    if distance <= circleRadius then
+                                        if plr.TeamColor == LocalPlayer.TeamColor then
+                                            adornment.Color = BrickColor.new("Bright green") -- Same team
+                                        else
+                                            adornment.Color = BrickColor.new("Bright red") -- Different team
+                                        end
+                                    else
+                                        adornment.Color = plr.TeamColor -- Default color
+                                    end
+
+                                    -- Change head color based on health
+                                    if adornment.Adornee and adornment.Adornee.Name == "Head" then
+                                        adornment.Color3 = healthColor
+                                    end
+                                end
+                            end
+                        end
+                    end
+                    lastESPUpdate[plr.Name] = tick() -- Update ESP timestamp
+                end
+            end
+        end
+        task.wait() -- Check every 0.1 seconds
+    end
+
+    -- Cleanup the circle if CHMS is disabled
+    circle:Destroy()
+end
+
+-- Cleanup ESP instances that haven't updated in 15 minutes
+local function cleanUpStaleESP()
+    while CHMSenabled do
+        for name, timestamp in pairs(lastESPUpdate) do
+            if tick() - timestamp > 900 then -- 15 minutes = 900 seconds
+                local holder = COREGUI:FindFirstChild(name .. "_CHMS")
+                if holder then
+                    holder:Destroy()
+                end
+                lastESPUpdate[name] = nil
+            end
+        end
+        task.wait(60) -- Run cleanup every 60 seconds
+    end
+end
+
+-- Initialize ESP for all players
+for _, plr in pairs(game:GetService("Players"):GetPlayers()) do
+    if plr ~= LocalPlayer then
+        CHMS(plr)
+    end
+end
+
+Players.PlayerAdded:Connect(function(plr)
+    if CHMSenabled then
+        repeat wait(1) until plr.Character and getRoot(plr.Character)
+        CHMS(plr)
+    end
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+    if CHMSenabled then
+        for _, v in pairs(COREGUI:GetChildren()) do
+            if v.Name == player.Name .. "_CHMS" then
+                v:Destroy()
+            end
+        end
+        lastESPUpdate[player.Name] = nil
+    end
+end)
+
+-- Function to refresh ESP periodically
+local function refreshESP()
+    while CHMSenabled do
+        for _, plr in pairs(Players:GetPlayers()) do
+            if plr ~= LocalPlayer then
+                CHMS(plr) -- Rerun the ESP setup
+            end
+        end
+        task.wait(RefreshTime) -- Refresh every 60 seconds
+    end
+end
+
+-- Start monitoring the circle, ESP cleanup, and periodic refresh
+task.spawn(monitorCircle)
+task.spawn(cleanUpStaleESP)
+task.spawn(refreshESP)
