@@ -1,0 +1,808 @@
+getgenv().SecureMode = true
+local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+local Window = Rayfield:CreateWindow({
+   Name = "Universal Hitbox Extender",
+   LoadingTitle = "Universal Hitbox Extender",
+   LoadingSubtitle = "by someone you might know",
+   ConfigurationSaving = {
+      Enabled = true,
+      FolderName = "UHEV1", 
+      FileName = "UHEV1"
+   },
+   Discord = {
+      Enabled = false,
+      Invite = "", 
+      RememberJoins = true 
+   },
+   KeySystem = false, 
+   KeySettings = {
+      Title = "Untitled",
+      Subtitle = "Key System",
+      Note = "No method of obtaining the key is provided",
+      FileName = "Key", 
+      SaveKey = true, 
+      GrabKeyFromSite = false, 
+      Key = {"Hello"} 
+   }
+})
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+local RunService = game:GetService("RunService")
+local COREGUI = cloneref(game:GetService("CoreGui"))
+local lastESPUpdate = {}
+-- settings here
+local espTransparency = 0.8
+local circleTransparency = 1 
+local CHMSenabled = true
+local CircleHealth = false
+local ESPHealthDisplay = false
+local CircleRadiusFR = 50 --studs
+local CircleOffset = -2.5 --studs
+local RefreshTime = 60 --seconds, for refreshing every now and then
+local FakeCircleRadius = CircleRadiusFR*2
+-- Helper function to get the player's root part
+local function getRoot(char)
+    return char:FindFirstChild('HumanoidRootPart') or char:FindFirstChild('Torso') or char:FindFirstChild('UpperTorso')
+end
+
+-- Function to create a visible circle under the player's feet
+local function createCircle()
+    local circle = Instance.new("Part")
+    circle.Size = Vector3.new(FakeCircleRadius, FakeCircleRadius, FakeCircleRadius)
+    circle.Anchored = true
+    circle.CanCollide = false
+    circle.Transparency = circleTransparency
+    circle.Color = Color3.fromRGB(255, 255, 255)
+    circle.Name = "PlayerCircle"
+
+    local mesh = Instance.new("CylinderMesh")
+    mesh.Scale = Vector3.new(1, 0, 1) -- Adjust scale to match the circle radius
+    mesh.Parent = circle
+    circle.Parent = workspace
+
+    return circle
+end
+
+local function resetESPsToDefault()
+    for _, plr in pairs(Players:GetPlayers()) do
+        local holder = COREGUI:FindFirstChild(plr.Name .. "_CHMS")
+        if holder then
+            for _, adornment in pairs(holder:GetChildren()) do
+                if adornment:IsA("BoxHandleAdornment") then
+                    adornment.Color = plr.TeamColor -- Reset to the player's team color
+                end
+            end
+        end
+    end
+end
+
+
+-- Update circle position to match the player's position
+local function updateCircle(circle, root, humanoid)
+    if root then
+        circle.Transparency = circleTransparency
+        local offset = Vector3.new(0, CircleOffset, 0)
+        -- Correct orientation: flat circle under player's feet
+        circle.CFrame = CFrame.new(root.Position + offset) * CFrame.Angles(0, 0, 0)
+        if humanoid and CircleHealth then
+            local healthPercentage = humanoid.Health / humanoid.MaxHealth
+            local red = (1 - healthPercentage) * 255
+            local green = healthPercentage * 255
+            circle.Color = Color3.fromRGB(red, green, 0)
+        elseif humanoid and not CircleHealth then
+            circle.Color = Color3.fromRGB(255, 255, 255)
+        end
+    end
+end
+
+-- Function to create ESP for a given player
+local function CHMS(plr)
+    task.spawn(function()
+        for _, v in pairs(COREGUI:GetChildren()) do
+            if v.Name == plr.Name .. "_CHMS" then
+                v:Destroy()
+            end
+        end
+
+        if plr.Character and plr.Name ~= LocalPlayer.Name and not COREGUI:FindFirstChild(plr.Name .. "_CHMS") then
+            local ESPholder = Instance.new("Folder")
+            ESPholder.Name = plr.Name .. "_CHMS"
+            ESPholder.Parent = COREGUI
+
+            repeat task.wait(1) until plr.Character and getRoot(plr.Character) and plr.Character:FindFirstChildOfClass("Humanoid")
+
+            for _, n in pairs(plr.Character:GetChildren()) do
+                if n:IsA("BasePart") then
+                    local a = Instance.new("BoxHandleAdornment")
+                    a.Name = plr.Name
+                    a.Parent = ESPholder
+                    a.Adornee = n
+                    a.AlwaysOnTop = true
+                    a.ZIndex = 10
+                    a.Size = n.Size
+                    a.Transparency = espTransparency
+                    a.Color = plr.TeamColor
+                end
+            end
+
+            lastESPUpdate[plr.Name] = tick() -- Track when ESP was last updated
+        end
+    end)
+end
+
+local function updateCircleSize(circle)
+    if circle then
+        circle.Size = Vector3.new(CircleRadiusFR * 2, CircleRadiusFR * 2, CircleRadiusFR * 2) -- Adjust size
+        local mesh = circle:FindFirstChildOfClass("CylinderMesh")
+        if mesh then
+            mesh.Scale = Vector3.new(1, 0, 1) -- Flat visualization
+        end
+    end
+end
+
+-- Circle generation and ESP color change logic
+local function monitorCircle()
+    local circle
+    local circleRadius = CircleRadiusFR -- 50 studs
+
+    while true do
+        if CHMSenabled then
+            if not circle then
+                -- Create the circle if it doesn't exist
+                circle = createCircle()
+                updateCircleSize(circle) -- Initialize size
+            end
+
+            if CircleRadiusFR ~= lastRadius then
+                -- Update circle size if the radius has changed
+                updateCircleSize(circle)
+                lastRadius = CircleRadiusFR
+            end
+
+            if LocalPlayer.Character and getRoot(LocalPlayer.Character) then
+                local localRoot = getRoot(LocalPlayer.Character)
+                local humanoid = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+                updateCircle(circle, localRoot, humanoid)
+
+                -- Update ESP for other players
+                for _, plr in pairs(Players:GetPlayers()) do
+                    if plr ~= LocalPlayer and plr.Character and getRoot(plr.Character) then
+                        local plrRoot = getRoot(plr.Character)
+                        local distance = (localRoot.Position - plrRoot.Position).Magnitude
+
+                        local holder = COREGUI:FindFirstChild(plr.Name .. "_CHMS")
+                        if holder then
+                            local humanoid = plr.Character:FindFirstChildOfClass("Humanoid")
+                            if humanoid then
+                                local healthPercentage = humanoid.Health / humanoid.MaxHealth
+                                local red = (1 - healthPercentage) * 255
+                                local green = healthPercentage * 255
+                                local healthColor = Color3.fromRGB(red, green, 0)
+
+                                for _, adornment in pairs(holder:GetChildren()) do
+                                    if adornment:IsA("BoxHandleAdornment") then
+                                        if distance <= CircleRadiusFR then
+                                            if plr.TeamColor == LocalPlayer.TeamColor then
+                                                adornment.Color = BrickColor.new("Bright green") -- Same team
+                                            else
+                                                adornment.Color = BrickColor.new("Bright red") -- Different team
+                                            end
+                                        else
+                                            adornment.Color = plr.TeamColor -- Default color
+                                        end
+
+                                        -- Change head color based on health
+                                        if ESPHealthDisplay and adornment.Adornee and adornment.Adornee.Name == "Head" then
+                                            adornment.Color3 = healthColor
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                        lastESPUpdate[plr.Name] = tick() -- Update ESP timestamp
+                    end
+                end
+            end
+        else
+            -- If CHMS is disabled, clean up the circle
+            resetESPsToDefault()
+            if circle then
+                circle:Destroy()
+                circle = nil
+            end
+        end
+        task.wait() -- Check every 0 seconds
+    end
+end
+
+
+-- Cleanup ESP instances that haven't updated in 15 minutes
+local function cleanUpStaleESP()
+    while CHMSenabled do
+        for name, timestamp in pairs(lastESPUpdate) do
+            if tick() - timestamp > 900 then -- 15 minutes = 900 seconds
+                local holder = COREGUI:FindFirstChild(name .. "_CHMS")
+                if holder then
+                    holder:Destroy()
+                end
+                lastESPUpdate[name] = nil
+            end
+        end
+        task.wait(60) -- Run cleanup every 60 seconds
+    end
+end
+
+-- Initialize ESP for all players
+for _, plr in pairs(game:GetService("Players"):GetPlayers()) do
+    if plr ~= LocalPlayer then
+        CHMS(plr)
+    end
+end
+
+Players.PlayerAdded:Connect(function(plr)
+    if CHMSenabled then
+        repeat wait(1) until plr.Character and getRoot(plr.Character)
+        CHMS(plr)
+    end
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+    if CHMSenabled then
+        for _, v in pairs(COREGUI:GetChildren()) do
+            if v.Name == player.Name .. "_CHMS" then
+                v:Destroy()
+            end
+        end
+        lastESPUpdate[player.Name] = nil
+    end
+end)
+
+-- Function to refresh ESP periodically
+local function refreshESP()
+    while CHMSenabled do
+        for _, plr in pairs(Players:GetPlayers()) do
+            if plr ~= LocalPlayer then
+                CHMS(plr) -- Rerun the ESP setup
+            end
+        end
+        task.wait(RefreshTime) -- Refresh every 60 seconds
+    end
+end
+
+-- Start monitoring the circle, ESP cleanup, and periodic refresh
+task.spawn(monitorCircle)
+task.spawn(cleanUpStaleESP)
+task.spawn(refreshESP)
+
+-- normal stuff begins here
+local Players = game:GetService("Players")
+local Tab = Window:CreateTab("Main", 4483362458) -- Title, Image
+local Section = Tab:CreateSection("Master")
+getgenv().HitboxX = 5
+getgenv().HitboxY = 5
+getgenv().HitboxZ = 5
+getgenv().HitboxTransparency = 0.95
+local notifs = loadstring(game:HttpGet('https://raw.githubusercontent.com/CF-Trail/random/main/FE2Notifs.lua'))()
+getgenv().HitboxStatus = false
+getgenv().TeamCheck = false
+
+--// hbe functions here
+
+
+local Keybind = Tab:CreateKeybind({
+   Name = "HBE Toggle",
+   CurrentKeybind = "J",
+   HoldToInteract = false,
+   Flag = "KeybindHBE2", 
+   Callback = function(Keybind)
+if HitboxStatus1 then
+            HitboxStatus1 = false
+            HitboxStatus2 = true
+            notifs.alert('Hitbox switched to HEAD',nil,nil,'rainbow')
+            game:GetService("StarterGui"):SetCore("SendNotification", { 
+	          Title = "Switched to HEAD";
+	          Text = "Press the keybind again to switch to TORSO";
+	          Icon = "rbxthumb://type=Asset&id=9537505725&w=150&h=150"})
+              Duration = 20;
+        else
+            HitboxStatus1 = true
+            HitboxStatus2 = false
+            notifs.alert('Hitbox switched to TORSO',nil,nil,'rainbow')
+            game:GetService("StarterGui"):SetCore("SendNotification", { 
+	          Title = "Switched to TORSO";
+	          Text = "Press the keybind again to switch to HEAD";
+	          Icon = "rbxthumb://type=Asset&id=113197031939423&w=150&h=150"})
+              Duration = 20;
+        end
+
+   end,
+})
+
+local Toggle = Tab:CreateToggle({
+    Name = "HBE1",
+   CurrentValue = false,
+   Flag = "HBE1", -- A flag is the identifier for the configuration file, make sure every element has a different flag if you're using configuration saving to ensure no overlaps
+   Callback = function(Value)
+   getgenv().HitboxStatus1 = Value
+game:GetService('RunService').RenderStepped:connect(function()
+		if HitboxStatus1 == true and TeamCheck == false then
+			for i,v in next, game:GetService('Players'):GetPlayers() do
+				if v.Name ~= game:GetService('Players').LocalPlayer.Name then
+					pcall(function()
+						v.Character.HumanoidRootPart.Size = Vector3.new(HitboxX, HitboxY, HitboxZ)
+						v.Character.HumanoidRootPart.Transparency = HitboxTransparency
+						v.Character.HumanoidRootPart.BrickColor = BrickColor.new("Really black")
+						v.Character.HumanoidRootPart.Material = "Neon"
+						v.Character.HumanoidRootPart.CanCollide = false
+                        v.Character.HumanoidRootPart.Locked = false
+                        
+                        
+					end)
+				end
+			end
+		elseif HitboxStatus1 == true and TeamCheck == true then
+			for i,v in next, game:GetService('Players'):GetPlayers() do
+				if game:GetService('Players').LocalPlayer.Team ~= v.Team then
+					pcall(function()
+						v.Character.HumanoidRootPart.Size = Vector3.new(HitboxX, HitboxY, HitboxZ)
+						v.Character.HumanoidRootPart.Transparency = HitboxTransparency
+						v.Character.HumanoidRootPart.BrickColor = BrickColor.new("Really black")
+						v.Character.HumanoidRootPart.Material = "Neon"
+						v.Character.HumanoidRootPart.CanCollide = false
+                        v.Character.HumanoidRootPart.Locked = false
+                        
+                        
+					end)
+				end
+			end
+		else
+		    for i,v in next, game:GetService('Players'):GetPlayers() do
+				if v.Name ~= game:GetService('Players').LocalPlayer.Name then
+					pcall(function()
+						v.Character.HumanoidRootPart.Size = Vector3.new(2,2,1)
+						v.Character.HumanoidRootPart.Transparency = 1
+						v.Character.HumanoidRootPart.BrickColor = BrickColor.new("Medium stone grey")
+						v.Character.HumanoidRootPart.Material = "Plastic"
+						v.Character.HumanoidRootPart.CanCollide = false
+                        v.Character.HumanoidRootPart.Locked = false
+
+					end)
+				end
+			end
+		end
+	end)
+
+
+end,
+})
+
+local Toggle = Tab:CreateToggle({
+    Name = "HBE2",
+   CurrentValue = false,
+   Flag = "HBE2", -- A flag is the identifier for the configuration file, make sure every element has a different flag if you're using configuration saving to ensure no overlaps
+   Callback = function(Value)
+   getgenv().HitboxStatus2 = Value
+game:GetService('RunService').RenderStepped:connect(function()
+		if HitboxStatus2 == true and TeamCheck == false then
+			for i,v in next, game:GetService('Players'):GetPlayers() do
+				if v.Name ~= game:GetService('Players').LocalPlayer.Name then
+					pcall(function()
+						v.Character.Head.Size = Vector3.new(HitboxX, HitboxY, HitboxZ)
+						v.Character.Head.Transparency = HitboxTransparency
+						v.Character.Head.BrickColor = BrickColor.new("Really black")
+						v.Character.Head.Material = "Neon"
+						v.Character.Head.CanCollide = false
+                        v.Character.Head.Locked = false
+                        
+                        
+					end)
+				end
+			end
+		elseif HitboxStatus2 == true and TeamCheck == true then
+			for i,v in next, game:GetService('Players'):GetPlayers() do
+				if game:GetService('Players').LocalPlayer.Team ~= v.Team then
+					pcall(function()
+						v.Character.Head.Size = Vector3.new(HitboxX, HitboxY, HitboxZ)
+						v.Character.Head.Transparency = HitboxTransparency
+						v.Character.Head.BrickColor = BrickColor.new("Really black")
+						v.Character.Head.Material = "Neon"
+						v.Character.Head.CanCollide = false
+                        v.Character.Head.Locked = false
+                        
+                        
+					end)
+				end
+			end
+		else
+		    for i,v in next, game:GetService('Players'):GetPlayers() do
+				if v.Name ~= game:GetService('Players').LocalPlayer.Name then
+					pcall(function()
+						v.Character.Head.Size = Vector3.new(2,2,1)
+						v.Character.Head.Transparency = 1
+						v.Character.Head.BrickColor = BrickColor.new("Medium stone grey")
+						v.Character.Head.Material = "Plastic"
+						v.Character.Head.CanCollide = false
+                        v.Character.Head.Locked = false
+
+					end)
+				end
+			end
+		end
+	end)
+end,
+})
+
+local Button = Tab:CreateButton({
+   Name = "HBE Reset",
+   Callback = function()
+   HitboxStatus1 = false
+   HitboxStatus2 = false
+   end,
+})
+
+local Toggle = Tab:CreateToggle({
+   Name = "Highlight ESP",
+   CurrentValue = true,
+   Flag = "Highlight1", -- A flag is the identifier for the configuration file, make sure every element has a different flag if you're using configuration saving to ensure no overlaps
+   Callback = function(Value)
+ getgenv().enabled = Value --Toggle on/off
+ getgenv().filluseteamcolor = true --Toggle fill color using player team color on/off
+ getgenv().outlineuseteamcolor = true --Toggle outline color using player team color on/off
+ getgenv().fillcolor = Color3.new(0, 0, 0) --Change fill color, no need to edit if using team color
+ getgenv().outlinecolor = Color3.new(1, 1, 1) --Change outline color, no need to edit if using team color
+ getgenv().filltrans = 0.9 --Change fill transparency
+ getgenv().outlinetrans = 0 --Change outline transparency
+
+ loadstring(game:HttpGet("https://raw.githubusercontent.com/Vcsk/RobloxScripts/main/Highlight-ESP.lua"))()
+
+ local c = workspace.CurrentCamera
+ local ps = game:GetService("Players")
+ local lp = ps.LocalPlayer
+ local rs = game:GetService("RunService")
+
+ local function esp(p,cr)
+	local h = cr:WaitForChild("Humanoid")
+	local hrp = cr:WaitForChild("Head")
+
+	local text = Drawing.new("Text")
+	text.Visible = false
+	text.Center = true
+	text.Outline = false 
+	text.Font = 3
+	text.Size = 16.16
+	text.Color = Color3.new(170,170,170)
+
+	local conection
+	local conection2
+	local conection3
+
+	local function dc()
+		text.Visible = false
+		text:Remove()
+		if conection then
+			conection:Disconnect()
+			conection = nil 
+		end
+		if conection2 then
+			conection2:Disconnect()
+			conection2 = nil 
+		end
+		if conection3 then
+			conection3:Disconnect()
+			conection3 = nil 
+		end
+	end
+
+	conection2 = cr.AncestryChanged:Connect(function(_,parent)
+		if not parent then
+			dc()
+		end
+	end)
+
+	conection3 = h.HealthChanged:Connect(function(v)
+		if (v<=0) or (h:GetState() == Enum.HumanoidStateType.Dead) then
+			dc()
+		end
+	end)
+
+	conection = rs.RenderStepped:Connect(function()
+		local hrp_pos,hrp_onscreen = c:WorldToViewportPoint(hrp.Position)
+		if hrp_onscreen and ESPName == true then
+			text.Position = Vector2.new(hrp_pos.X, hrp_pos.Y - 27)
+			text.Text = p.DisplayName.." (@"..p.Name..")"
+			text.Visible = true
+		else
+			text.Visible = false
+		end
+	end)
+ end
+
+ local function p_added(p)
+	if p.Character then
+		esp(p,p.Character)
+	end
+	p.CharacterAdded:Connect(function(cr)
+		esp(p,cr)
+	end)
+ end
+
+ for i,p in next, ps:GetPlayers() do 
+	if p ~= lp then
+		p_added(p)
+	end
+ end
+
+ ps.PlayerAdded:Connect(p_added)
+end,
+})
+
+
+
+local Toggle = Tab:CreateToggle({
+   Name = "Team Check",
+   CurrentValue = false,
+   Flag = "Team1", -- A flag is the identifier for the configuration file, make sure every element has a different flag if you're using configuration saving to ensure no overlaps
+   Callback = function(Value)
+   getgenv().TeamCheck = Value
+   end,
+})
+
+local Section = Tab:CreateSection("Hitbox Sizes")
+
+local Slider = Tab:CreateSlider({
+   Name = "Hitbox Size",
+   Range = {0, 15},
+   Increment = 0.1,
+   Suffix = "Studs",
+   CurrentValue = 6,
+   Flag = "RealHitbox", -- A flag is the identifier for the configuration file, make sure every element has a different flag if you're using configuration saving to ensure no overlaps
+   Callback = function(Value)
+   getgenv().HitboxX = Value
+   getgenv().HitboxZ = Value
+   getgenv().HitboxY = Value
+   end,
+})
+
+
+local Slider = Tab:CreateSlider({
+   Name = "Hitbox Size (X)",
+   Range = {0, 10},
+   Increment = 0.1,
+   Suffix = "Studs",
+   CurrentValue = 6,
+   Flag = "HitboxX", -- A flag is the identifier for the configuration file, make sure every element has a different flag if you're using configuration saving to ensure no overlaps
+   Callback = function(Value)
+   getgenv().HitboxX = Value
+   end,
+})
+local Slider = Tab:CreateSlider({
+   Name = "Hitbox Size (Y)",
+   Range = {0, 10},
+   Increment = 0.1,
+   Suffix = "Studs",
+   CurrentValue = 6,
+   Flag = "HitboxY", -- A flag is the identifier for the configuration file, make sure every element has a different flag if you're using configuration saving to ensure no overlaps
+   Callback = function(Value)
+   getgenv().HitboxY = Value
+   end,
+})
+local Slider = Tab:CreateSlider({
+   Name = "Hitbox Size (Z)",
+   Range = {0, 10},
+   Increment = 0.1,
+   Suffix = "Studs",
+   CurrentValue = 6,
+   Flag = "HitboxZ", -- A flag is the identifier for the configuration file, make sure every element has a different flag if you're using configuration saving to ensure no overlaps
+   Callback = function(Value)
+   getgenv().HitboxZ = Value
+   end,
+})
+
+local Section = Tab:CreateSection("Transparency Settings")
+
+local Slider = Tab:CreateSlider({
+   Name = "Hitbox Transparency",
+   Range = {0, 1},
+   Increment = 0.05,
+   Suffix = "/1",
+   CurrentValue = 0.95,
+   Flag = "HBE5", -- A flag is the identifier for the configuration file, make sure every element has a different flag if you're using configuration saving to ensure no overlaps
+   Callback = function(Value)
+   getgenv().HitboxTransparency = Value
+   end,
+})
+
+local Slider = Tab:CreateSlider({
+   Name = "Fill Transparency",
+   Range = {0, 1},
+   Increment = 0.05,
+   Suffix = "/1",
+   CurrentValue = 1,
+   Flag = "Fill1", -- A flag is the identifier for the configuration file, make sure every element has a different flag if you're using configuration saving to ensure no overlaps
+   Callback = function(Value)
+   getgenv().filltrans = Value
+   end,
+})
+local Slider = Tab:CreateSlider({
+   Name = "Outline Transparency",
+   Range = {0, 1},
+   Increment = 0.05,
+   Suffix = "/1",
+   CurrentValue = 0,
+   Flag = "Outline1", -- A flag is the identifier for the configuration file, make sure every element has a different flag if you're using configuration saving to ensure no overlaps
+   Callback = function(Value)
+   getgenv().outlinetrans = Value
+   end,
+})
+local Paragraph = Tab:CreateParagraph({Title = "How transparency works in ROBLOX", Content = "0 is completely solid, 1 is completely transparent"})
+
+local Tab = Window:CreateTab("Fast TP", 4483362458) -- Title, Image
+getgenv().tpstudZ = 3
+getgenv().tpstudY = 0
+local directionaldash = false
+local Toggle = Tab:CreateToggle({
+   Name = "Directional Dashing",
+   CurrentValue = false,
+   Flag = "DirDash", -- A flag is the identifier for the configuration file, make sure every element has a different flag if you're using configuration saving to ensure no overlaps
+   Callback = function(Value)
+   directionaldash = Value
+   end,
+})
+local Keybind = Tab:CreateKeybind({
+   Name = "FastTP Keybind",
+   CurrentKeybind = "H",
+   HoldToInteract = false, 
+   Flag = "TPKeybind", -- A flag is the identifier for the configuration file, make sure every element has a different flag if you're using configuration saving to ensure no overlaps
+   Callback = function(Keybind)
+   game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame = game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame * CFrame.new(0, tpstudY, -tpstudZ);
+   end,
+})
+local Slider = Tab:CreateSlider({
+   Name = "Studs Horizontal",
+   Range = {0, 20},
+   Increment = 1,
+   Suffix = "Studs",
+   CurrentValue = 3,
+   Flag = "TPDistance1", -- A flag is the identifier for the configuration file, make sure every element has a different flag if you're using configuration saving to ensure no overlaps
+   Callback = function(Value)
+   getgenv().tpstudZ = Value
+   end,
+})
+
+local Slider = Tab:CreateSlider({
+   Name = "Studs Vertical",
+   Range = {0, 20},
+   Increment = 1,
+   Suffix = "Studs",
+   CurrentValue = 0,
+   Flag = "TPDistance2", -- A flag is the identifier for the configuration file, make sure every element has a different flag if you're using configuration saving to ensure no overlaps
+   Callback = function(Value)
+   getgenv().tpstudY = Value
+   end,
+})
+
+local Tab = Window:CreateTab("Circle ESP", 4483362458)
+local Toggle = Tab:CreateToggle({
+   Name = "Circle ESP",
+   CurrentValue = false,
+   Flag = "CircleESP", -- A flag is the identifier for the configuration file, make sure every element has a different flag if you're using configuration saving to ensure no overlaps
+   Callback = function(Value)
+   CHMSenabled = Value
+   end,
+})
+
+local Toggle = Tab:CreateToggle({
+   Name = "ESP Health Display (Head)",
+   CurrentValue = false,
+   Flag = "ESPHD", -- A flag is the identifier for the configuration file, make sure every element has a different flag if you're using configuration saving to ensure no overlaps
+   Callback = function(Value)
+   ESPHealthDisplay = Value
+   end,
+})
+
+
+local Slider = Tab:CreateSlider({
+   Name = "Circle Transparency (Set to 1 to disable)",
+   Range = {0, 1},
+   Increment = 0.05,
+   Suffix = "Trans People",
+   CurrentValue = 1,
+   Flag = "CircleTransparency", -- A flag is the identifier for the configuration file, make sure every element has a different flag if you're using configuration saving to ensure no overlaps
+   Callback = function(Value)
+   circleTransparency = Value
+   end,
+})
+
+local Toggle = Tab:CreateToggle({
+   Name = "Circle Health Display",
+   CurrentValue = false,
+   Flag = "CircleHPDisplay", -- A flag is the identifier for the configuration file, make sure every element has a different flag if you're using configuration saving to ensure no overlaps
+   Callback = function(Value)
+   CircleHealth = Value
+   end,
+})
+
+local Slider = Tab:CreateSlider({
+   Name = "Circle Radius",
+   Range = {1, 100},
+   Increment = 1,
+   Suffix = "Studs",
+   CurrentValue = 25,
+   Flag = "CircleRadius", -- A flag is the identifier for the configuration file, make sure every element has a different flag if you're using configuration saving to ensure no overlaps
+   Callback = function(Value)
+   CircleRadiusFR = Value
+   FakeCircleRadius = CircleRadiusFR*2
+   end,
+})
+
+local Slider = Tab:CreateSlider({
+   Name = "Circle Vertical Offset",
+   Range = {-5, 5},
+   Increment = 0.1,
+   Suffix = "Studs",
+   CurrentValue = -2.5,
+   Flag = "CVOffset", -- A flag is the identifier for the configuration file, make sure every element has a different flag if you're using configuration saving to ensure no overlaps
+   Callback = function(Value)
+   CircleOffset = Value
+   end,
+})
+
+local Slider = Tab:CreateSlider({
+   Name = "ESP AutoRefresh Time",
+   Range = {10, 900},
+   Increment = 10,
+   Suffix = "Seconds",
+   CurrentValue = 60,
+   Flag = "RefreshTime", -- A flag is the identifier for the configuration file, make sure every element has a different flag if you're using configuration saving to ensure no overlaps
+   Callback = function(Value)
+   CircleOffset = Value
+   end,
+})
+
+local Tab = Window:CreateTab("Other Scripts", 4483362458) -- Title, Image
+local Button = Tab:CreateButton({
+   Name = "fates esp (Silent Aim/Aimbot)",
+   Callback = function()
+   loadstring(game:HttpGet('https://raw.githubusercontent.com/fatesc/fates-esp/main/main.lua'))()
+   end,
+})
+local Button = Tab:CreateButton({
+   Name = "Exunys' AirHub(Aimlock, other stuff)",
+   Callback = function()
+   loadstring(game:HttpGet("https://raw.githubusercontent.com/Exunys/AirHub/main/AirHub.lua"))()
+   end,
+})
+local Button = Tab:CreateButton({
+   Name = "Adonis Bypass",
+   Callback = function()
+   loadstring(game:HttpGet("https://raw.githubusercontent.com/RelkzzRebranded/Bypassed---OBFUSCATED..../main/Adonis%20BYPASS.lua"))()
+   end,
+})
+
+local Button = Tab:CreateButton({
+   Name = "IY",
+   Callback = function()
+   loadstring(game:HttpGet('https://raw.githubusercontent.com/EdgeIY/infiniteyield/master/source'))()
+   end,
+})
+
+local Tab = Window:CreateTab("Settings", 4483362458) -- Title, Image
+ local Keybind = Tab:CreateKeybind({
+   Name = "UI Keybind",
+   CurrentKeybind = "P",
+   HoldToInteract = false,
+   Flag = "KeybindUI", 
+   Callback = function(Keybind)
+   if Hidden then
+            Hidden = false
+            Unhide()
+        else
+            if not SearchHided then spawn(CloseSearch) end
+            Hidden = true
+            Hide()
+        end
+
+   end,
+})
+
+Rayfield:LoadConfiguration()
