@@ -1,0 +1,212 @@
+-- Create a ScreenGui
+local screenGui = Instance.new("ScreenGui")
+screenGui.Parent = game.CoreGui
+
+-- Create a Frame for the health bar
+local healthBar = Instance.new("Frame")
+healthBar.Size = UDim2.new(0.1, 0, 0.01, 0)
+healthBar.BackgroundColor3 = Color3.fromRGB(0, 255, 0)
+healthBar.BorderColor3 = Color3.fromRGB(0, 128, 0)
+healthBar.BorderSizePixel = 2
+healthBar.BackgroundTransparency = 0.5
+healthBar.Parent = screenGui
+healthBar.SizeConstraint = Enum.SizeConstraint.RelativeXY
+healthBar.AnchorPoint = Vector2.new(0.5, 0)
+-- Create a TextLabel for the health percentage
+local healthText = Instance.new("TextLabel")
+healthText.Size = UDim2.new(1, 0, 2, 0)
+healthText.BackgroundTransparency = 1
+healthText.TextTransparency = 0.1
+healthText.TextStrokeTransparency = 0.7
+healthText.TextColor3 = Color3.fromRGB(255, 255, 255)
+healthText.TextScaled = false
+healthText.TextSize = 10
+healthText.Parent = healthBar
+healthText.Position = UDim2.new(0, 0, 0, -16)
+
+local xray = Instance.new("TextLabel")
+xray.Visible = false
+xray.Text = "XRAY ON"
+xray.Size = UDim2.new(1, 0, 0.02, 0)
+xray.Position = UDim2.new(0, 0, 0.51, 0)
+xray.BackgroundTransparency = 1
+xray.TextTransparency = 0.1
+xray.TextStrokeTransparency = 0.7
+xray.TextColor3 = Color3.fromRGB(0, 255, 0)
+xray.TextStrokeColor3 = Color3.fromRGB(0, 255, 0)
+xray.TextScaled = true
+xray.Parent = screenGui
+
+
+local TweenService = game:GetService("TweenService")
+
+-- Function to update the health bar
+local function updateHealthBar(health, maxHealth)
+    local healthPercentage = health / maxHealth
+    healthBar.Size = UDim2.new(healthPercentage*0.1, 0, 0.01, 0)
+    healthText.Text = tostring(health) .. "/" .. tostring(maxHealth) .. " | " .. string.format("%d%%", healthPercentage * 100)
+    -- Change color based on health percentage
+    local red = (1 - healthPercentage) * 255
+    local green = healthPercentage * 255 
+    healthBar.BackgroundColor3 = Color3.fromRGB(red, green, 0)
+    healthBar.BorderColor3 = Color3.fromRGB(red * 0.5, green * 0.5, 0)
+    healthText.TextColor3 = Color3.fromRGB(red, green, 0)
+    healthText.TextStrokeColor3 = Color3.fromRGB(red, green, 0)
+    
+    -- Shake the health bar
+    local shakeAmount = 15
+    local goal = {}
+    goal.Position = UDim2.new(healthBar.Position.X.Scale, healthBar.Position.X.Offset + math.random(-shakeAmount, shakeAmount), healthBar.Position.Y.Scale, healthBar.Position.Y.Offset + math.random(-shakeAmount, shakeAmount))
+    local tweenInfo = TweenInfo.new(0.1, Enum.EasingStyle.Linear, Enum.EasingDirection.Out)
+    local tween = TweenService:Create(healthBar, tweenInfo, goal)
+    tween:Play()
+end
+
+-- Function to set up the health bar for the player
+local function setupHealthBar(player)
+    local character = player.Character or player.CharacterAdded:Wait()
+    local humanoid = character:WaitForChild("Humanoid")
+
+    -- Update the health bar whenever the player's health changes
+    humanoid.HealthChanged:Connect(function(health)
+        updateHealthBar(health, humanoid.MaxHealth)
+    end)
+
+    -- Initial update
+    updateHealthBar(humanoid.Health, humanoid.MaxHealth)
+end
+
+-- Example usage
+local player = game.Players.LocalPlayer
+
+-- Set up the health bar when the player spawns
+player.CharacterAdded:Connect(function()
+    setupHealthBar(player)
+end)
+
+-- Set up the health bar for the current character if it exists
+if player.Character then
+    setupHealthBar(player)
+end
+
+-- Move the health bar with the cursor 
+game:GetService("UserInputService").InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement then
+        healthBar.Position = UDim2.new(0, (input.Position.X), 0, (input.Position.Y+30))
+    end
+end)
+
+
+
+-- Store parts that have been hit
+local hitParts = {}
+
+-- Function to create a raycast
+local function createRaycast()
+    local player = game.Players.LocalPlayer
+    local mouse = player:GetMouse()
+
+    -- Define the grid offsets
+    local offsets = {
+        Vector3.new(-0.2, 0.2, 0), Vector3.new(0, 0.2, 0), Vector3.new(0.2, 0.2, 0),
+        Vector3.new(-0.2, 0, 0), Vector3.new(0, 0, 0), Vector3.new(0.2, 0, 0),
+        Vector3.new(-0.2, -0.2, 0), Vector3.new(0, -0.2, 0), Vector3.new(0.2, -0.2, 0)
+    }
+
+    -- Reset transparency of previously hit parts
+    for part, _ in pairs(hitParts) do
+        if part and part:IsA("BasePart") then
+            part.Transparency = 0
+        end
+    end
+    hitParts = {}
+
+    -- Cast rays in a 3x3 grid pattern
+    for _, offset in ipairs(offsets) do
+        local rayOrigin = mouse.UnitRay.Origin + offset
+        local rayDirection = mouse.UnitRay.Direction * 100
+        local raycastParams = RaycastParams.new()
+        raycastParams.FilterDescendantsInstances = {player.Character}
+        raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
+
+        local raycastResult = workspace:Raycast(rayOrigin, rayDirection, raycastParams)
+
+        if raycastResult then
+            local hitPart = raycastResult.Instance
+            if hitPart and hitPart:IsA("BasePart") and hitPart.Transparency < 1 then
+                hitPart.Transparency = hitPart.Transparency + 0.7
+                hitParts[hitPart] = true
+            end
+        end
+    end
+end
+
+-- Example usage
+local player = game.Players.LocalPlayer
+local userInputService = game:GetService("UserInputService")
+
+-- Function to check if the left mouse button or X key is held
+local function isInputHeld()
+    return userInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) and userInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) or userInputService:IsKeyDown(Enum.KeyCode.X)
+end
+
+-- Run the raycast when the input is held
+while true do
+    if isInputHeld() then
+        createRaycast()
+        xray.Visible = true
+    else
+        xray.Visible = false
+        for part, _ in pairs(hitParts) do
+        if part and part:IsA("BasePart") then
+            part.Transparency = 0
+        end
+        end
+    end
+    wait(0.1)
+end
+
+-- Table to store parts that have been made transparent
+local transparentParts = {}
+
+-- Function to make parts transparent
+local function makePartsTransparent()
+    local player = game.Players.LocalPlayer
+    local character = player.Character or player.CharacterAdded:Wait()
+    local humanoidRootPart = character:WaitForChild("HumanoidRootPart")
+
+    for _, part in ipairs(workspace:GetDescendants()) do
+        if part:IsA("BasePart") and (part.Position - humanoidRootPart.Position).Magnitude <= 50 then
+            if part.Transparency == 0 then
+                part.Transparency = 0.5
+                table.insert(transparentParts, part)
+            end
+        end
+    end
+end
+
+-- Function to reset parts transparency
+local function resetPartsTransparency()
+    for _, part in ipairs(transparentParts) do
+        if part and part:IsA("BasePart") then
+            part.Transparency = 0
+        end
+    end
+    -- Clear the table after resetting transparency
+    transparentParts = {}
+end
+
+-- Example usage
+local userInputService = game:GetService("UserInputService")
+
+userInputService.InputBegan:Connect(function(input)
+    if input.KeyCode == Enum.KeyCode.X then
+        makePartsTransparent()
+    end
+end)
+
+userInputService.InputEnded:Connect(function(input)
+    if input.KeyCode == Enum.KeyCode.X then
+        resetPartsTransparency()
+    end
+end)
