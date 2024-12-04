@@ -1,3 +1,6 @@
+local M1M2Xray = false
+local XXRay = false
+
 local screenGui = Instance.new("ScreenGui")
 screenGui.Parent = game.CoreGui
 
