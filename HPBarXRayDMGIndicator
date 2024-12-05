@@ -57,7 +57,7 @@ local function updateHealthBar(health, maxHealth)
     healthBar.BackgroundColor3 = Color3.fromRGB(red, green, 0)
     healthBar.BorderColor3 = Color3.fromRGB(red * 0.5, green * 0.5, 0)
     healthText.TextColor3 = Color3.fromRGB(red, green, 0)
-    healthText.TextStrokeColor3 = Color3.fromRGB(red, green, 0)
+    healthText.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
     
     -- Shake the health bar
     local shakeAmount = 15
