@@ -1,3 +1,8 @@
+function round(num, numDecimalPlaces)
+	local mult = 10^(numDecimalPlaces or 0)
+	return math.floor(num * mult + 0.5) / mult
+end
+
 local m1m2 = false
 local x = true
 local function deciran(minimum, maximum)
@@ -50,7 +55,7 @@ local TweenService = game:GetService("TweenService")
 local function updateHealthBar(health, maxHealth)
     local healthPercentage = health / maxHealth
     healthBar.Size = UDim2.new(healthPercentage*0.1, 0, 0.01, 0)
-    healthText.Text = tostring(health) .. "/" .. tostring(maxHealth) .. " | " .. string.format("%d%%", healthPercentage * 100)
+    healthText.Text = round(tostring(health)) .. "/" .. tostring(maxHealth) .. " | " .. string.format("%d%%", round(healthPercentage * 100))
     -- Change color based on health percentage
     local red = (1 - healthPercentage) * 255
     local green = healthPercentage * 255 
