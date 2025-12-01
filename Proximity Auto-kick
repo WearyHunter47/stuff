@@ -1,9 +1,9 @@
 -- autokick when player gets close script
 
 -- // CONFIG //
-local TRIGGER_DISTANCE = 15      -- studs
-local RESPAWN_IMMUNITY = 3       -- seconds
-local CHECK_RATE = 0.2           -- seconds between scans
+local TRIGGER_DISTANCE = 20      -- studs
+local RESPAWN_IMMUNITY = 5       -- seconds
+local CHECK_RATE = 0.1           -- seconds between scans
 
 
 -- // SERVICES //
