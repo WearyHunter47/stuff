@@ -1,0 +1,122 @@
+-- autokick when player gets close script
+
+-- // CONFIG //
+local TRIGGER_DISTANCE = 15      -- studs
+local RESPAWN_IMMUNITY = 3       -- seconds
+local CHECK_RATE = 0.2           -- seconds between scans
+
+
+-- // SERVICES //
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local LocalPlayer = Players.LocalPlayer
+
+
+-- // GUI SETUP //
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "AutoKickProximity"
+screenGui.ResetOnSpawn = false
+
+-- parenting
+pcall(function()
+    if gethui then
+        screenGui.Parent = gethui()
+    else
+        screenGui.Parent = game:GetService("CoreGui")
+    end
+end)
+
+-- status label
+local statusLabel = Instance.new("TextLabel")
+statusLabel.Size = UDim2.new(0, 300, 0, 30)
+statusLabel.Position = UDim2.new(0, 20, 0, 20)
+statusLabel.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+statusLabel.TextColor3 = Color3.fromRGB(255,255,255)
+statusLabel.Font = Enum.Font.SourceSansBold
+statusLabel.TextSize = 18
+statusLabel.Text = "Proximity Kick: ACTIVE"
+statusLabel.Parent = screenGui
+
+-- toggle button
+local toggleButton = Instance.new("TextButton")
+toggleButton.Size = UDim2.new(0, 150, 0, 30)
+toggleButton.Position = UDim2.new(0, 20, 0, 60)
+toggleButton.BackgroundColor3 = Color3.fromRGB(80, 160, 80)
+toggleButton.TextColor3 = Color3.fromRGB(255,255,255)
+toggleButton.Font = Enum.Font.SourceSansBold
+toggleButton.TextSize = 16
+toggleButton.Text = "Turn OFF"
+toggleButton.Parent = screenGui
+
+
+-- // STATE //
+local enabled = true
+local lastRespawnTime = tick()
+
+
+-- toggle logic
+local function updateToggleUI()
+    if enabled then
+        toggleButton.BackgroundColor3 = Color3.fromRGB(80, 160, 80)
+        toggleButton.Text = "Turn OFF"
+        statusLabel.Text = "Proximity Kick: ACTIVE"
+    else
+        toggleButton.BackgroundColor3 = Color3.fromRGB(160, 80, 80)
+        toggleButton.Text = "Turn ON"
+        statusLabel.Text = "Proximity Kick: DISABLED"
+    end
+end
+
+toggleButton.MouseButton1Click:Connect(function()
+    enabled = not enabled
+    updateToggleUI()
+end)
+
+
+-- track respawns for immunity
+local function connectCharacter(char)
+    lastRespawnTime = tick()
+end
+
+if LocalPlayer.Character then
+    connectCharacter(LocalPlayer.Character)
+end
+
+LocalPlayer.CharacterAdded:Connect(connectCharacter)
+
+
+-- // MAIN LOOP //
+RunService.Heartbeat:Connect(function()
+    if not enabled then return end
+
+    -- immunity after respawn
+    local elapsed = tick() - lastRespawnTime
+    if elapsed < RESPAWN_IMMUNITY then
+        statusLabel.Text = "IMMUNE (" .. math.floor(RESPAWN_IMMUNITY - elapsed) .. "s)"
+        return
+    end
+
+    statusLabel.Text = "Proximity Kick: ACTIVE"
+
+    local char = LocalPlayer.Character
+    if not char then return end
+
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+
+    -- check all players
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer and plr.Character then
+            local enemyRoot = plr.Character:FindFirstChild("HumanoidRootPart")
+            if enemyRoot then
+                local dist = (enemyRoot.Position - root.Position).Magnitude
+                if dist <= TRIGGER_DISTANCE then
+                    game.Players.LocalPlayer:Kick("Someone got close.")
+                    return
+                end
+            end
+        end
+    end
+
+    task.wait(CHECK_RATE)
+end)
