@@ -20,6 +20,14 @@
         "Aimed"   — arrow only when the viewer's look beam hits you
         "Visible" — arrow when the viewer has any visibility fraction > 0
         "Always"  — arrow for any hostile that's off-screen/behind
+
+    Arrow appearance:
+        Blue (EDGE_ARROW_COLOR)       — viewer sees you but isn't aiming
+        Red  (EDGE_ARROW_ALERT_COLOR) — viewer is actively aiming at you
+
+    Nametag appearance:
+        Team color (player.TeamColor), white fallback if no team
+        Transparency 0.9 baseline → 0.0 when viewer is aiming at you
 ]]
 
 local Players          = game:GetService("Players")
@@ -78,14 +86,30 @@ local DEFAULTS = {
 
     EDGE_PADDING     = 64,
     EDGE_ARROW_SIZE  = 36,
-    EDGE_ARROW_COLOR = Color3.fromRGB(255, 45, 45),
-    EDGE_ARROW_ALPHA = 0.15,
 
-    EDGE_SHOW_NAME  = true,
-    EDGE_NAME_SIZE  = 14,
-    EDGE_NAME_COLOR = Color3.fromRGB(255, 255, 255),
-    EDGE_NAME_ALPHA = 0.1,
+    -- Arrow colors: two states, toggled by the look-beam hit
+    EDGE_ARROW_COLOR       = Color3.fromRGB(60, 140, 255),   -- just visible
+    EDGE_ARROW_ALERT_COLOR = Color3.fromRGB(255, 40, 40),    -- actively aiming
+    EDGE_ARROW_ALPHA       = 0.15,
+
+    -- Nametag: team-colored, transparency tracks the `viewing` state
+    EDGE_SHOW_NAME         = true,
+    EDGE_NAME_SIZE         = 14,
+    EDGE_NAME_COLOR        = Color3.fromRGB(255, 255, 255),  -- fallback only
+    EDGE_NAME_ALPHA        = 0.9,    -- baseline (not being viewed)
+    EDGE_NAME_ALPHA_VIEWED = 0.0,    -- fully visible when viewer is aiming at us
 }
+
+--------------------------------------------------------------------------------
+-- HELPERS
+--------------------------------------------------------------------------------
+local function teamColorOf(player)
+    if player.Team and player.TeamColor then
+        return player.TeamColor.Color
+    end
+    -- No team assigned → neutral white so the tag is still readable
+    return Color3.fromRGB(235, 235, 235)
+end
 
 --------------------------------------------------------------------------------
 -- SEI — ScreenEdgeIndicators (embedded sub-module)
@@ -96,16 +120,17 @@ ScreenEdgeIndicators.__index = ScreenEdgeIndicators
 function ScreenEdgeIndicators.new(overrides)
     local self = setmetatable({}, ScreenEdgeIndicators)
     self.config = {
-        PADDING         = 64,
-        ARROW_SIZE      = 36,
-        ARROW_COLOR     = Color3.fromRGB(255, 45, 45),
-        ARROW_ALPHA     = 0.15,
-        SHOW_NAME       = true,
-        NAME_SIZE       = 14,
-        NAME_COLOR      = Color3.fromRGB(255, 255, 255),
-        NAME_ALPHA      = 0.1,
-        UPDATE_INTERVAL = 0,
-        KILL_KEYBIND    = nil,
+        PADDING           = 64,
+        ARROW_SIZE        = 36,
+        ARROW_COLOR       = Color3.fromRGB(60, 140, 255),
+        ARROW_ALPHA       = 0.15,
+        SHOW_NAME         = true,
+        NAME_SIZE         = 14,
+        NAME_COLOR        = Color3.fromRGB(255, 255, 255),
+        NAME_ALPHA        = 0.9,
+        NAME_ALPHA_VIEWED = 0.0,
+        UPDATE_INTERVAL   = 0,
+        KILL_KEYBIND      = nil,
     }
     if overrides then
         for k, v in pairs(overrides) do self.config[k] = v end
@@ -144,7 +169,7 @@ function ScreenEdgeIndicators:_buildArrow(cfg)
     arrow.Name                   = "Arrow"
     arrow.Size                   = UDim2.fromScale(1, 1)
     arrow.BackgroundTransparency = 1
-    arrow.Image                  = "rbxassetid://5052874450"
+    arrow.Image                  = "rbxassetid://105578389638723"
     arrow.ImageColor3            = cfg.Color or self.config.ARROW_COLOR
     arrow.ImageTransparency      = cfg.Alpha or self.config.ARROW_ALPHA
     arrow.Rotation               = 0
@@ -176,18 +201,30 @@ function ScreenEdgeIndicators:_destroyTarget(player)
     self._targets[player] = nil
 end
 
+-- addTarget: creates a target on first call; refreshes dynamic fields on
+-- subsequent calls (ViewLines calls this every frame while the target qualifies).
 function ScreenEdgeIndicators:addTarget(player, opts)
-    if self._targets[player] then return end
     if player == LocalPlayer then return end
-
     opts = opts or {}
+
+    local existing = self._targets[player]
+    if existing then
+        existing.viewing   = opts.Viewing and true or false
+        existing.nameColor = opts.NameColor or existing.nameColor
+        if opts.Color then existing.color = opts.Color end
+        if opts.Alpha then existing.alpha = opts.Alpha end
+        return
+    end
+
     local frame, arrow, label = self:_buildArrow(opts)
     self._targets[player] = {
-        frame = frame,
-        arrow = arrow,
-        label = label,
-        color = opts.Color or self.config.ARROW_COLOR,
-        alpha = opts.Alpha or self.config.ARROW_ALPHA,
+        frame     = frame,
+        arrow     = arrow,
+        label     = label,
+        color     = opts.Color     or self.config.ARROW_COLOR,
+        alpha     = opts.Alpha     or self.config.ARROW_ALPHA,
+        nameColor = opts.NameColor or self.config.NAME_COLOR,
+        viewing   = opts.Viewing   and true or false,
     }
 end
 
@@ -225,13 +262,11 @@ function ScreenEdgeIndicators:update()
         else
             local screenPos, onScreen = cam:WorldToViewportPoint(anchor.Position)
 
-            -- Robust behind-camera check via camera-space Z.
             local camSpace = cam.CFrame:PointToObjectSpace(anchor.Position)
             local behind   = camSpace.Z >= 0
 
             local isOffscreen = (not onScreen) or behind
 
-            -- Also treat "clamped to the very edge" as offscreen.
             local clampedX = math.clamp(screenPos.X, pad, viewport.X - pad)
             local clampedY = math.clamp(screenPos.Y, pad, viewport.Y - pad)
             local atEdge   = (clampedX ~= screenPos.X) or (clampedY ~= screenPos.Y)
@@ -263,8 +298,18 @@ function ScreenEdgeIndicators:update()
                 local angle = math.deg(math.atan2(dir2D.X, dir2D.Y))
                 entry.arrow.Rotation = angle
 
+                -- Arrow appearance: color toggles between
+                -- "just visible" and "actively aiming"; alpha constant.
+                entry.arrow.ImageColor3     = entry.color
+                entry.arrow.ImageTransparency = entry.alpha
+
+                -- Nametag: team color, transparency tracks `viewing`.
                 if entry.label then
                     entry.label.Text = player.DisplayName or player.Name
+                    entry.label.TextColor3 = entry.nameColor
+                    entry.label.TextTransparency = entry.viewing
+                        and self.config.NAME_ALPHA_VIEWED
+                        or  self.config.NAME_ALPHA
                 end
             else
                 entry.frame.Visible = false
@@ -317,16 +362,17 @@ function ViewLines.new(overrides)
 
     -- Embedded SEI, configured from ViewLines' EDGE_* keys.
     self._edgeIndicators = ScreenEdgeIndicators.new({
-        PADDING         = self.config.EDGE_PADDING,
-        ARROW_SIZE      = self.config.EDGE_ARROW_SIZE,
-        ARROW_COLOR     = self.config.EDGE_ARROW_COLOR,
-        ARROW_ALPHA     = self.config.EDGE_ARROW_ALPHA,
-        SHOW_NAME       = self.config.EDGE_SHOW_NAME,
-        NAME_SIZE       = self.config.EDGE_NAME_SIZE,
-        NAME_COLOR      = self.config.EDGE_NAME_COLOR,
-        NAME_ALPHA      = self.config.EDGE_NAME_ALPHA,
-        UPDATE_INTERVAL = 0,
-        KILL_KEYBIND    = nil,   -- ViewLines owns the kill switch
+        PADDING           = self.config.EDGE_PADDING,
+        ARROW_SIZE        = self.config.EDGE_ARROW_SIZE,
+        ARROW_COLOR       = self.config.EDGE_ARROW_COLOR,
+        ARROW_ALPHA       = self.config.EDGE_ARROW_ALPHA,
+        SHOW_NAME         = self.config.EDGE_SHOW_NAME,
+        NAME_SIZE         = self.config.EDGE_NAME_SIZE,
+        NAME_COLOR        = self.config.EDGE_NAME_COLOR,
+        NAME_ALPHA        = self.config.EDGE_NAME_ALPHA,
+        NAME_ALPHA_VIEWED = self.config.EDGE_NAME_ALPHA_VIEWED,
+        UPDATE_INTERVAL   = 0,
+        KILL_KEYBIND      = nil,   -- ViewLines owns the kill switch
     })
 
     return self
@@ -654,8 +700,12 @@ function ViewLines:_updateEdgeIndicator(player, theirChar, hit, vis)
 
     if (not onScreen) or behind then
         self._edgeIndicators:addTarget(player, {
-            Color = cfg.EDGE_ARROW_COLOR,
-            Alpha = cfg.EDGE_ARROW_ALPHA,
+            -- Arrow: red when they're aiming at us, blue otherwise
+            Color     = hit and cfg.EDGE_ARROW_ALERT_COLOR or cfg.EDGE_ARROW_COLOR,
+            Alpha     = cfg.EDGE_ARROW_ALPHA,
+            -- Name: team color; `Viewing` drives the transparency flip
+            NameColor = teamColorOf(player),
+            Viewing   = hit,
         })
     else
         self._edgeIndicators:removeTarget(player)
@@ -810,14 +860,15 @@ function ViewLines:setConfig(partial)
     local cfg = self.config
     local sei = self._edgeIndicators
     if sei then
-        sei.config.PADDING     = cfg.EDGE_PADDING
-        sei.config.ARROW_SIZE  = cfg.EDGE_ARROW_SIZE
-        sei.config.ARROW_COLOR = cfg.EDGE_ARROW_COLOR
-        sei.config.ARROW_ALPHA = cfg.EDGE_ARROW_ALPHA
-        sei.config.SHOW_NAME   = cfg.EDGE_SHOW_NAME
-        sei.config.NAME_SIZE   = cfg.EDGE_NAME_SIZE
-        sei.config.NAME_COLOR  = cfg.EDGE_NAME_COLOR
-        sei.config.NAME_ALPHA  = cfg.EDGE_NAME_ALPHA
+        sei.config.PADDING           = cfg.EDGE_PADDING
+        sei.config.ARROW_SIZE        = cfg.EDGE_ARROW_SIZE
+        sei.config.ARROW_COLOR       = cfg.EDGE_ARROW_COLOR
+        sei.config.ARROW_ALPHA       = cfg.EDGE_ARROW_ALPHA
+        sei.config.SHOW_NAME         = cfg.EDGE_SHOW_NAME
+        sei.config.NAME_SIZE         = cfg.EDGE_NAME_SIZE
+        sei.config.NAME_COLOR        = cfg.EDGE_NAME_COLOR
+        sei.config.NAME_ALPHA        = cfg.EDGE_NAME_ALPHA
+        sei.config.NAME_ALPHA_VIEWED = cfg.EDGE_NAME_ALPHA_VIEWED
     end
 end
 
