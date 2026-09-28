@@ -27,7 +27,13 @@
 
     Nametag appearance:
         Team color (player.TeamColor), white fallback if no team
-        Transparency 0.9 baseline → 0.0 when viewer is aiming at you
+        Transparency 0.9 → 0.0 when viewer is aiming at you
+        Size 14 → 22 when viewer is aiming at you
+
+    Sight beam appearance:
+        Color + width driven by visibility fraction (grey → red gradient)
+        Transparency toggles 0.9 → 0.0 on the same `hit` signal as the
+        nametag. Suppressed entirely by HIDE_SIGHT_WHEN_AIMED = true.
 ]]
 
 local Players          = game:GetService("Players")
@@ -58,6 +64,13 @@ local DEFAULTS = {
     VISIBLE_WIDTH        = 0.15,
     BLOCKED_WIDTH        = 0.05,
     HIDE_SIGHT_WHEN_AIMED = true,
+
+    -- Sight beam transparency: two-state toggle mirroring the nametag.
+    -- UNVIEWED = baseline, VIEWED = when the viewer's look beam hits you.
+    -- These override VISIBLE_TRANSPARENCY / BLOCKED_TRANSPARENCY when the
+    -- beam is rendered; the visibility fraction still drives color + width.
+    SIGHT_ALPHA_UNVIEWED = 0.9,
+    SIGHT_ALPHA_VIEWED   = 0.0,
 
     -- Look beam (face → forward along Head.LookVector)
     LOOK_COLOR              = Color3.fromRGB(60, 140, 255),
@@ -92,9 +105,10 @@ local DEFAULTS = {
     EDGE_ARROW_ALERT_COLOR = Color3.fromRGB(255, 40, 40),    -- actively aiming
     EDGE_ARROW_ALPHA       = 0.15,
 
-    -- Nametag: team-colored, transparency tracks the `viewing` state
+    -- Nametag: team-colored, transparency + size track the `viewing` state
     EDGE_SHOW_NAME         = true,
     EDGE_NAME_SIZE         = 14,
+    EDGE_NAME_SIZE_VIEWED  = 22,     -- boost when viewer is aiming at us
     EDGE_NAME_COLOR        = Color3.fromRGB(255, 255, 255),  -- fallback only
     EDGE_NAME_ALPHA        = 0.9,    -- baseline (not being viewed)
     EDGE_NAME_ALPHA_VIEWED = 0.0,    -- fully visible when viewer is aiming at us
@@ -126,6 +140,7 @@ function ScreenEdgeIndicators.new(overrides)
         ARROW_ALPHA       = 0.15,
         SHOW_NAME         = true,
         NAME_SIZE         = 14,
+        NAME_SIZE_VIEWED  = 22,
         NAME_COLOR        = Color3.fromRGB(255, 255, 255),
         NAME_ALPHA        = 0.9,
         NAME_ALPHA_VIEWED = 0.0,
@@ -169,7 +184,7 @@ function ScreenEdgeIndicators:_buildArrow(cfg)
     arrow.Name                   = "Arrow"
     arrow.Size                   = UDim2.fromScale(1, 1)
     arrow.BackgroundTransparency = 1
-    arrow.Image                  = "rbxassetid://105578389638723"
+    arrow.Image                  = "rbxassetid://5052874450"
     arrow.ImageColor3            = cfg.Color or self.config.ARROW_COLOR
     arrow.ImageTransparency      = cfg.Alpha or self.config.ARROW_ALPHA
     arrow.Rotation               = 0
@@ -300,16 +315,22 @@ function ScreenEdgeIndicators:update()
 
                 -- Arrow appearance: color toggles between
                 -- "just visible" and "actively aiming"; alpha constant.
-                entry.arrow.ImageColor3     = entry.color
+                entry.arrow.ImageColor3       = entry.color
                 entry.arrow.ImageTransparency = entry.alpha
 
-                -- Nametag: team color, transparency tracks `viewing`.
+                -- Nametag: team color, transparency + size track `viewing`.
                 if entry.label then
                     entry.label.Text = player.DisplayName or player.Name
                     entry.label.TextColor3 = entry.nameColor
                     entry.label.TextTransparency = entry.viewing
                         and self.config.NAME_ALPHA_VIEWED
                         or  self.config.NAME_ALPHA
+
+                    local nameSize = entry.viewing
+                        and self.config.NAME_SIZE_VIEWED
+                        or  self.config.NAME_SIZE
+                    entry.label.TextSize = nameSize
+                    entry.label.Size     = UDim2.fromOffset(120, nameSize + 6)
                 end
             else
                 entry.frame.Visible = false
@@ -368,6 +389,7 @@ function ViewLines.new(overrides)
         ARROW_ALPHA       = self.config.EDGE_ARROW_ALPHA,
         SHOW_NAME         = self.config.EDGE_SHOW_NAME,
         NAME_SIZE         = self.config.EDGE_NAME_SIZE,
+        NAME_SIZE_VIEWED  = self.config.EDGE_NAME_SIZE_VIEWED,
         NAME_COLOR        = self.config.EDGE_NAME_COLOR,
         NAME_ALPHA        = self.config.EDGE_NAME_ALPHA,
         NAME_ALPHA_VIEWED = self.config.EDGE_NAME_ALPHA_VIEWED,
@@ -610,25 +632,29 @@ end
 --------------------------------------------------------------------------------
 -- APPEARANCE
 --------------------------------------------------------------------------------
-function ViewLines:_applySightAppearance(beam, vis)
+function ViewLines:_applySightAppearance(beam, vis, viewing)
     local cfg = self.config
-    local color, transparency, width
 
+    -- Color + width: driven by the visibility fraction, same as before.
+    local color, width
     if vis >= 1 then
-        color        = cfg.VISIBLE_COLOR
-        transparency = cfg.VISIBLE_TRANSPARENCY
-        width        = cfg.VISIBLE_WIDTH
+        color = cfg.VISIBLE_COLOR
+        width = cfg.VISIBLE_WIDTH
     elseif vis <= 0 then
-        color        = cfg.BLOCKED_COLOR
-        transparency = cfg.BLOCKED_TRANSPARENCY
-        width        = cfg.BLOCKED_WIDTH
+        color = cfg.BLOCKED_COLOR
+        width = cfg.BLOCKED_WIDTH
     else
-        color        = cfg.BLOCKED_COLOR:Lerp(cfg.VISIBLE_COLOR, vis)
-        transparency = cfg.BLOCKED_TRANSPARENCY
-            + (cfg.VISIBLE_TRANSPARENCY - cfg.BLOCKED_TRANSPARENCY) * vis
-        width        = cfg.BLOCKED_WIDTH
+        color = cfg.BLOCKED_COLOR:Lerp(cfg.VISIBLE_COLOR, vis)
+        width = cfg.BLOCKED_WIDTH
             + (cfg.VISIBLE_WIDTH - cfg.BLOCKED_WIDTH) * vis
     end
+
+    -- Transparency: two-state toggle mirroring the nametag.
+    -- SIGHT_ALPHA_UNVIEWED (dim) when they're not aimed at us,
+    -- SIGHT_ALPHA_VIEWED (opaque) when the look beam hits.
+    local transparency = viewing
+        and cfg.SIGHT_ALPHA_VIEWED
+        or  cfg.SIGHT_ALPHA_UNVIEWED
 
     beam.Color        = ColorSequence.new(color)
     beam.Transparency = NumberSequence.new(transparency)
@@ -703,7 +729,7 @@ function ViewLines:_updateEdgeIndicator(player, theirChar, hit, vis)
             -- Arrow: red when they're aiming at us, blue otherwise
             Color     = hit and cfg.EDGE_ARROW_ALERT_COLOR or cfg.EDGE_ARROW_COLOR,
             Alpha     = cfg.EDGE_ARROW_ALPHA,
-            -- Name: team color; `Viewing` drives the transparency flip
+            -- Name: team color; `Viewing` drives the transparency + size flip
             NameColor = teamColorOf(player),
             Viewing   = hit,
         })
@@ -784,7 +810,7 @@ function ViewLines:update()
                                 e.sightBeam.Enabled = false
                             else
                                 e.sightBeam.Enabled = true
-                                self:_applySightAppearance(e.sightBeam, vis)
+                                self:_applySightAppearance(e.sightBeam, vis, hit)
                             end
 
                             -- Off-screen arrow for viewers who can see us
@@ -866,6 +892,7 @@ function ViewLines:setConfig(partial)
         sei.config.ARROW_ALPHA       = cfg.EDGE_ARROW_ALPHA
         sei.config.SHOW_NAME         = cfg.EDGE_SHOW_NAME
         sei.config.NAME_SIZE         = cfg.EDGE_NAME_SIZE
+        sei.config.NAME_SIZE_VIEWED  = cfg.EDGE_NAME_SIZE_VIEWED
         sei.config.NAME_COLOR        = cfg.EDGE_NAME_COLOR
         sei.config.NAME_ALPHA        = cfg.EDGE_NAME_ALPHA
         sei.config.NAME_ALPHA_VIEWED = cfg.EDGE_NAME_ALPHA_VIEWED
