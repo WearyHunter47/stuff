@@ -635,26 +635,25 @@ end
 function ViewLines:_applySightAppearance(beam, vis, viewing)
     local cfg = self.config
 
-    -- Color + width: driven by the visibility fraction, same as before.
-    local color, width
-    if vis >= 1 then
-        color = cfg.VISIBLE_COLOR
-        width = cfg.VISIBLE_WIDTH
-    elseif vis <= 0 then
-        color = cfg.BLOCKED_COLOR
-        width = cfg.BLOCKED_WIDTH
-    else
-        color = cfg.BLOCKED_COLOR:Lerp(cfg.VISIBLE_COLOR, vis)
-        width = cfg.BLOCKED_WIDTH
-            + (cfg.VISIBLE_WIDTH - cfg.BLOCKED_WIDTH) * vis
-    end
+    -- Color + width + transparency all driven by the visibility fraction,
+    -- so a viewer who can see more of you produces a more prominent beam.
+    local color, width, transparency
 
-    -- Transparency: two-state toggle mirroring the nametag.
-    -- SIGHT_ALPHA_UNVIEWED (dim) when they're not aimed at us,
-    -- SIGHT_ALPHA_VIEWED (opaque) when the look beam hits.
-    local transparency = viewing
-        and cfg.SIGHT_ALPHA_VIEWED
-        or  cfg.SIGHT_ALPHA_UNVIEWED
+    if vis <= 0 then
+        color        = cfg.BLOCKED_COLOR
+        width        = cfg.BLOCKED_WIDTH
+        transparency = cfg.SIGHT_ALPHA_UNVIEWED
+    elseif vis >= 1 then
+        color        = cfg.VISIBLE_COLOR
+        width        = cfg.VISIBLE_WIDTH
+        transparency = cfg.SIGHT_ALPHA_VIEWED
+    else
+        color        = cfg.BLOCKED_COLOR:Lerp(cfg.VISIBLE_COLOR, vis)
+        width        = cfg.BLOCKED_WIDTH
+            + (cfg.VISIBLE_WIDTH - cfg.BLOCKED_WIDTH) * vis
+        transparency = cfg.SIGHT_ALPHA_UNVIEWED
+            + (cfg.SIGHT_ALPHA_VIEWED - cfg.SIGHT_ALPHA_UNVIEWED) * vis
+    end
 
     beam.Color        = ColorSequence.new(color)
     beam.Transparency = NumberSequence.new(transparency)
