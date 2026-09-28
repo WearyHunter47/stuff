@@ -1,6 +1,7 @@
 --[[
-    ViewLines v4 — module
-    Player line-of-sight + look-direction visualizer.
+    ViewLines + SEI — merged module
+    Player line-of-sight + look-direction visualizer with off-screen
+    edge arrows for viewers who can see you but are outside your viewport.
 
     Usage:
         local ViewLines = loadstring(game:HttpGet(URL))()
@@ -12,9 +13,13 @@
     Or drive it from your own loop:
         local v = ViewLines.new()
         yourHeartbeat:Connect(function() v:update() end)
-        -- no :start() needed
 
     F10 kills by default; pass KILL_KEYBIND = nil to disable.
+
+    Edge indicator modes:
+        "Aimed"   — arrow only when the viewer's look beam hits you
+        "Visible" — arrow when the viewer has any visibility fraction > 0
+        "Always"  — arrow for any hostile that's off-screen/behind
 ]]
 
 local Players          = game:GetService("Players")
@@ -25,9 +30,10 @@ local LocalPlayer = Players.LocalPlayer
 local Camera      = workspace.CurrentCamera
 
 --------------------------------------------------------------------------------
--- DEFAULTS
+-- DEFAULTS (ViewLines + SEI merged)
 --------------------------------------------------------------------------------
 local DEFAULTS = {
+    -- -- ViewLines ----------------------------------------------------------
     FOV_DEGREES = 120,
     SAMPLE_PARTS = {
         "Head",
@@ -43,33 +49,250 @@ local DEFAULTS = {
     BLOCKED_TRANSPARENCY = 0.9,
     VISIBLE_WIDTH        = 0.15,
     BLOCKED_WIDTH        = 0.05,
-    HIDE_SIGHT_WHEN_AIMED = true,   -- hide sight beam when look beam hits
+    HIDE_SIGHT_WHEN_AIMED = true,
 
     -- Look beam (face → forward along Head.LookVector)
     LOOK_COLOR              = Color3.fromRGB(60, 140, 255),
     LOOK_HIT_COLOR          = Color3.fromRGB(255, 40, 40),
-    LOOK_TRANSPARENCY_NEAR  = 0.10,  -- at the face
-    LOOK_TRANSPARENCY_FAR   = 0.95,  -- at LOOK_RANGE
+    LOOK_TRANSPARENCY_NEAR  = 0.10,
+    LOOK_TRANSPARENCY_FAR   = 0.95,
     LOOK_WIDTH              = 0.18,
     LOOK_RANGE              = 35,
     LOOK_CLAMP_TO_WALL      = true,
     LOOK_HIT_RADIUS         = 1.5,
 
-    -- Sniper dot at the tip of the look beam
+    -- Sniper dot
     LOOK_DOT_ENABLED  = true,
     LOOK_DOT_SIZE     = 0.35,
     LOOK_DOT_ALPHA    = 0.1,
 
     TEAM_CHECK      = true,
     IGNORE_WATER    = true,
-    UPDATE_INTERVAL = 0,      -- 0 = every frame
-    MAX_DISTANCE    = 0,      -- 0 = no limit
+    UPDATE_INTERVAL = 0,
+    MAX_DISTANCE    = 0,
+    KILL_KEYBIND    = Enum.KeyCode.F10,
 
-    KILL_KEYBIND = Enum.KeyCode.F10,
+    -- -- Edge indicators (SEI) ----------------------------------------------
+    EDGE_INDICATORS     = true,
+    EDGE_INDICATOR_MODE = "Aimed",   -- "Aimed" | "Visible" | "Always"
+
+    EDGE_PADDING     = 64,
+    EDGE_ARROW_SIZE  = 36,
+    EDGE_ARROW_COLOR = Color3.fromRGB(255, 45, 45),
+    EDGE_ARROW_ALPHA = 0.15,
+
+    EDGE_SHOW_NAME  = true,
+    EDGE_NAME_SIZE  = 14,
+    EDGE_NAME_COLOR = Color3.fromRGB(255, 255, 255),
+    EDGE_NAME_ALPHA = 0.1,
 }
 
 --------------------------------------------------------------------------------
--- MODULE
+-- SEI — ScreenEdgeIndicators (embedded sub-module)
+--------------------------------------------------------------------------------
+local ScreenEdgeIndicators = {}
+ScreenEdgeIndicators.__index = ScreenEdgeIndicators
+
+function ScreenEdgeIndicators.new(overrides)
+    local self = setmetatable({}, ScreenEdgeIndicators)
+    self.config = {
+        PADDING         = 64,
+        ARROW_SIZE      = 36,
+        ARROW_COLOR     = Color3.fromRGB(255, 45, 45),
+        ARROW_ALPHA     = 0.15,
+        SHOW_NAME       = true,
+        NAME_SIZE       = 14,
+        NAME_COLOR      = Color3.fromRGB(255, 255, 255),
+        NAME_ALPHA      = 0.1,
+        UPDATE_INTERVAL = 0,
+        KILL_KEYBIND    = nil,
+    }
+    if overrides then
+        for k, v in pairs(overrides) do self.config[k] = v end
+    end
+
+    self._targets     = {}
+    self._connections = {}
+    self._running     = false
+    self._lastUpdate  = 0
+
+    local gui = Instance.new("ScreenGui")
+    gui.Name            = "ScreenEdgeIndicators"
+    gui.ResetOnSpawn    = false
+    gui.IgnoreGuiInset  = true
+    gui.ZIndexBehavior  = Enum.ZIndexBehavior.Sibling
+    gui.Parent          = LocalPlayer:WaitForChild("PlayerGui")
+    self._gui = gui
+
+    return self
+end
+
+function ScreenEdgeIndicators:_track(conn)
+    self._connections[#self._connections + 1] = conn
+    return conn
+end
+
+function ScreenEdgeIndicators:_buildArrow(cfg)
+    local frame = Instance.new("Frame")
+    frame.Name                   = "ArrowRoot"
+    frame.Size                   = UDim2.fromOffset(self.config.ARROW_SIZE, self.config.ARROW_SIZE)
+    frame.AnchorPoint            = Vector2.new(0.5, 0.5)
+    frame.BackgroundTransparency = 1
+    frame.Parent                 = self._gui
+
+    local arrow = Instance.new("ImageLabel")
+    arrow.Name                   = "Arrow"
+    arrow.Size                   = UDim2.fromScale(1, 1)
+    arrow.BackgroundTransparency = 1
+    arrow.Image                  = "rbxassetid://3926305904"
+    arrow.ImageColor3            = cfg.Color or self.config.ARROW_COLOR
+    arrow.ImageTransparency      = cfg.Alpha or self.config.ARROW_ALPHA
+    arrow.Rotation               = 0
+    arrow.Parent                 = frame
+
+    local label
+    if self.config.SHOW_NAME then
+        label = Instance.new("TextLabel")
+        label.Name                   = "Name"
+        label.AnchorPoint            = Vector2.new(0.5, 0)
+        label.Position               = UDim2.new(0.5, 0, 1, 4)
+        label.Size                   = UDim2.fromOffset(120, self.config.NAME_SIZE + 6)
+        label.BackgroundTransparency = 1
+        label.Font                   = Enum.Font.GothamMedium
+        label.TextSize               = self.config.NAME_SIZE
+        label.TextColor3             = self.config.NAME_COLOR
+        label.TextTransparency       = self.config.NAME_ALPHA
+        label.Text                   = ""
+        label.Parent                 = frame
+    end
+
+    return frame, arrow, label
+end
+
+function ScreenEdgeIndicators:_destroyTarget(player)
+    local entry = self._targets[player]
+    if not entry then return end
+    if entry.frame then entry.frame:Destroy() end
+    self._targets[player] = nil
+end
+
+function ScreenEdgeIndicators:addTarget(player, opts)
+    if self._targets[player] then return end
+    if player == LocalPlayer then return end
+
+    opts = opts or {}
+    local frame, arrow, label = self:_buildArrow(opts)
+    self._targets[player] = {
+        frame = frame,
+        arrow = arrow,
+        label = label,
+        color = opts.Color or self.config.ARROW_COLOR,
+        alpha = opts.Alpha or self.config.ARROW_ALPHA,
+    }
+end
+
+function ScreenEdgeIndicators:removeTarget(player)
+    self:_destroyTarget(player)
+end
+
+function ScreenEdgeIndicators:clearTargets()
+    local list = {}
+    for p in pairs(self._targets) do list[#list + 1] = p end
+    for _, p in ipairs(list) do self:_destroyTarget(p) end
+end
+
+function ScreenEdgeIndicators:update()
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+
+    local viewport = cam.ViewportSize
+    if viewport.X <= 0 or viewport.Y <= 0 then return end
+
+    local pad   = self.config.PADDING
+    local halfX = viewport.X * 0.5
+    local halfY = viewport.Y * 0.5
+
+    for player, entry in pairs(self._targets) do
+        local char = player.Character
+        local anchor
+        if char then
+            anchor = char:FindFirstChild("HumanoidRootPart")
+                  or char:FindFirstChild("Head")
+        end
+
+        if not anchor then
+            entry.frame.Visible = false
+        else
+            local screenPos, onScreen = cam:WorldToViewportPoint(anchor.Position)
+
+            -- Robust behind-camera check via camera-space Z.
+            local camSpace = cam.CFrame:PointToObjectSpace(anchor.Position)
+            local behind   = camSpace.Z >= 0
+
+            local isOffscreen = (not onScreen) or behind
+
+            -- Also treat "clamped to the very edge" as offscreen.
+            local clampedX = math.clamp(screenPos.X, pad, viewport.X - pad)
+            local clampedY = math.clamp(screenPos.Y, pad, viewport.Y - pad)
+            local atEdge   = (clampedX ~= screenPos.X) or (clampedY ~= screenPos.Y)
+
+            if isOffscreen or atEdge then
+                entry.frame.Visible = true
+
+                local toTarget = anchor.Position - cam.CFrame.Position
+                local obj      = cam.CFrame:VectorToObjectSpace(toTarget)
+
+                local dir2D = Vector2.new(obj.X, obj.Y)
+                if dir2D.Magnitude < 1e-4 then
+                    dir2D = Vector2.new(0, 1)
+                end
+                dir2D = dir2D.Unit
+
+                local tX = halfX / math.max(math.abs(dir2D.X), 1e-4)
+                local tY = halfY / math.max(math.abs(dir2D.Y), 1e-4)
+                local t  = math.min(tX, tY)
+
+                local edgeX = halfX + dir2D.X * t
+                local edgeY = halfY - dir2D.Y * t
+
+                edgeX = math.clamp(edgeX, pad, viewport.X - pad)
+                edgeY = math.clamp(edgeY, pad, viewport.Y - pad)
+
+                entry.frame.Position = UDim2.fromOffset(edgeX, edgeY)
+
+                local angle = math.deg(math.atan2(dir2D.X, dir2D.Y))
+                entry.arrow.Rotation = angle
+
+                if entry.label then
+                    entry.label.Text = player.DisplayName or player.Name
+                end
+            else
+                entry.frame.Visible = false
+            end
+        end
+    end
+end
+
+function ScreenEdgeIndicators:stop()
+    -- Unconditional cleanup: safe even if :start() was never called.
+    for _, c in ipairs(self._connections) do
+        pcall(function() c:Disconnect() end)
+    end
+    self._connections = {}
+    self:clearTargets()
+    if self._gui then
+        self._gui:Destroy()
+        self._gui = nil
+    end
+    self._running = false
+end
+
+function ScreenEdgeIndicators:destroy()
+    self:stop()
+end
+
+--------------------------------------------------------------------------------
+-- ViewLines
 --------------------------------------------------------------------------------
 local ViewLines = {}
 ViewLines.__index = ViewLines
@@ -86,10 +309,26 @@ function ViewLines.new(overrides)
     if overrides then
         for k, v in pairs(overrides) do self.config[k] = v end
     end
+
     self._entries     = {}
     self._connections = {}
     self._running     = false
     self._lastUpdate  = 0
+
+    -- Embedded SEI, configured from ViewLines' EDGE_* keys.
+    self._edgeIndicators = ScreenEdgeIndicators.new({
+        PADDING         = self.config.EDGE_PADDING,
+        ARROW_SIZE      = self.config.EDGE_ARROW_SIZE,
+        ARROW_COLOR     = self.config.EDGE_ARROW_COLOR,
+        ARROW_ALPHA     = self.config.EDGE_ARROW_ALPHA,
+        SHOW_NAME       = self.config.EDGE_SHOW_NAME,
+        NAME_SIZE       = self.config.EDGE_NAME_SIZE,
+        NAME_COLOR      = self.config.EDGE_NAME_COLOR,
+        NAME_ALPHA      = self.config.EDGE_NAME_ALPHA,
+        UPDATE_INTERVAL = 0,
+        KILL_KEYBIND    = nil,   -- ViewLines owns the kill switch
+    })
+
     return self
 end
 
@@ -151,12 +390,14 @@ function ViewLines:_cleanup(player)
         if obj then obj:Destroy() end
     end
     self._entries[player] = nil
+    self._edgeIndicators:removeTarget(player)
 end
 
 function ViewLines:_cleanupAll()
     local list = {}
     for p in pairs(self._entries) do list[#list + 1] = p end
     for _, p in ipairs(list) do self:_cleanup(p) end
+    self._edgeIndicators:clearTargets()
 end
 
 function ViewLines:_ensureEntry(player, myRoot)
@@ -355,9 +596,6 @@ function ViewLines:_applyLookAppearance(entry, hit, length)
 
     entry.lookBeam.Color = ColorSequence.new(color)
 
-    -- Fade gradient: transparency at the tip is proportional to how much
-    -- of LOOK_RANGE this beam actually spans. A 5-stud beam inside a 35-stud
-    -- range is barely faded; a 35-stud beam fades all the way to FAR.
     local ratio = math.clamp(length / math.max(cfg.LOOK_RANGE, 1e-3), 0, 1)
     local tipT  = cfg.LOOK_TRANSPARENCY_NEAR
                 + (cfg.LOOK_TRANSPARENCY_FAR - cfg.LOOK_TRANSPARENCY_NEAR) * ratio
@@ -373,6 +611,58 @@ function ViewLines:_applyLookAppearance(entry, hit, length)
 end
 
 --------------------------------------------------------------------------------
+-- EDGE INDICATOR DECISION (per viewer, per frame)
+--------------------------------------------------------------------------------
+function ViewLines:_updateEdgeIndicator(player, theirChar, hit, vis)
+    local cfg = self.config
+
+    if not cfg.EDGE_INDICATORS then
+        self._edgeIndicators:removeTarget(player)
+        return
+    end
+
+    -- Mode gate
+    local mode = cfg.EDGE_INDICATOR_MODE
+    local qualifies
+    if mode == "Aimed" then
+        qualifies = hit
+    elseif mode == "Visible" then
+        qualifies = vis > 0.001
+    else -- "Always"
+        qualifies = true
+    end
+
+    if not qualifies then
+        self._edgeIndicators:removeTarget(player)
+        return
+    end
+
+    -- Is the viewer off-screen / behind us?
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+
+    local viewerRoot = theirChar:FindFirstChild("HumanoidRootPart")
+                    or theirChar:FindFirstChild("Head")
+    if not viewerRoot then
+        self._edgeIndicators:removeTarget(player)
+        return
+    end
+
+    local _, onScreen = cam:WorldToViewportPoint(viewerRoot.Position)
+    local camSpace     = cam.CFrame:PointToObjectSpace(viewerRoot.Position)
+    local behind       = camSpace.Z >= 0
+
+    if (not onScreen) or behind then
+        self._edgeIndicators:addTarget(player, {
+            Color = cfg.EDGE_ARROW_COLOR,
+            Alpha = cfg.EDGE_ARROW_ALPHA,
+        })
+    else
+        self._edgeIndicators:removeTarget(player)
+    end
+end
+
+--------------------------------------------------------------------------------
 -- PUBLIC: update()
 --------------------------------------------------------------------------------
 function ViewLines:update()
@@ -382,6 +672,7 @@ function ViewLines:update()
     local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
     if not myChar or not myRoot then
         self:_cleanupAll()
+        self._edgeIndicators:update()
         return
     end
 
@@ -431,23 +722,33 @@ function ViewLines:update()
                             )
                             self:_applyLookAppearance(e, hit, length)
 
+                            -- Visibility fraction (always computed, used by
+                            -- both the sight beam and the edge indicator).
+                            local vis = self:_evaluateVisibility(
+                                theirChar, head, myChar, mySamples
+                            )
+
                             -- Sight beam: hide it when the look beam already
                             -- says "I'm being aimed at".
                             if cfg.HIDE_SIGHT_WHEN_AIMED and hit then
                                 e.sightBeam.Enabled = false
                             else
                                 e.sightBeam.Enabled = true
-                                local vis = self:_evaluateVisibility(
-                                    theirChar, head, myChar, mySamples
-                                )
                                 self:_applySightAppearance(e.sightBeam, vis)
                             end
+
+                            -- Off-screen arrow for viewers who can see us
+                            -- but are outside our viewport.
+                            self:_updateEdgeIndicator(player, theirChar, hit, vis)
                         end
                     end
                 end
             end
         end
     end
+
+    -- Drive SEI from our own loop (single update tick for everything).
+    self._edgeIndicators:update()
 end
 
 --------------------------------------------------------------------------------
@@ -485,14 +786,14 @@ function ViewLines:start()
 end
 
 function ViewLines:stop()
-    if not self._running then return end
-    self._running = false
-
+    -- Unconditional: safe even if :start() was never called.
     for _, c in ipairs(self._connections) do
         pcall(function() c:Disconnect() end)
     end
     self._connections = {}
     self:_cleanupAll()
+    self._edgeIndicators:stop()
+    self._running = false
 end
 
 function ViewLines:destroy()
@@ -503,6 +804,20 @@ function ViewLines:setConfig(partial)
     if not partial then return end
     for k, v in pairs(partial) do
         self.config[k] = v
+    end
+
+    -- Mirror EDGE_* updates into the SEI sub-config.
+    local cfg = self.config
+    local sei = self._edgeIndicators
+    if sei then
+        sei.config.PADDING     = cfg.EDGE_PADDING
+        sei.config.ARROW_SIZE  = cfg.EDGE_ARROW_SIZE
+        sei.config.ARROW_COLOR = cfg.EDGE_ARROW_COLOR
+        sei.config.ARROW_ALPHA = cfg.EDGE_ARROW_ALPHA
+        sei.config.SHOW_NAME   = cfg.EDGE_SHOW_NAME
+        sei.config.NAME_SIZE   = cfg.EDGE_NAME_SIZE
+        sei.config.NAME_COLOR  = cfg.EDGE_NAME_COLOR
+        sei.config.NAME_ALPHA  = cfg.EDGE_NAME_ALPHA
     end
 end
 
