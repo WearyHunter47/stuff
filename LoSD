@@ -1,0 +1,513 @@
+--[[
+    ViewLines v4 — module
+    Player line-of-sight + look-direction visualizer.
+
+    Usage:
+        local ViewLines = loadstring(game:HttpGet(URL))()
+        local v = ViewLines.new({ FOV_DEGREES = 110 })
+        v:start()
+        -- ...
+        v:stop()
+
+    Or drive it from your own loop:
+        local v = ViewLines.new()
+        yourHeartbeat:Connect(function() v:update() end)
+        -- no :start() needed
+
+    F10 kills by default; pass KILL_KEYBIND = nil to disable.
+]]
+
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+
+local LocalPlayer = Players.LocalPlayer
+local Camera      = workspace.CurrentCamera
+
+--------------------------------------------------------------------------------
+-- DEFAULTS
+--------------------------------------------------------------------------------
+local DEFAULTS = {
+    FOV_DEGREES = 120,
+    SAMPLE_PARTS = {
+        "Head",
+        "UpperTorso", "LowerTorso", "Torso",
+        "LeftUpperArm", "RightUpperArm",
+        "Left Arm",     "Right Arm",
+    },
+
+    -- Sight beam (viewer head → my root)
+    VISIBLE_COLOR        = Color3.fromRGB(255, 45, 45),
+    BLOCKED_COLOR        = Color3.fromRGB(80, 80, 80),
+    VISIBLE_TRANSPARENCY = 0.15,
+    BLOCKED_TRANSPARENCY = 0.9,
+    VISIBLE_WIDTH        = 0.15,
+    BLOCKED_WIDTH        = 0.05,
+    HIDE_SIGHT_WHEN_AIMED = true,   -- hide sight beam when look beam hits
+
+    -- Look beam (face → forward along Head.LookVector)
+    LOOK_COLOR              = Color3.fromRGB(60, 140, 255),
+    LOOK_HIT_COLOR          = Color3.fromRGB(255, 40, 40),
+    LOOK_TRANSPARENCY_NEAR  = 0.10,  -- at the face
+    LOOK_TRANSPARENCY_FAR   = 0.95,  -- at LOOK_RANGE
+    LOOK_WIDTH              = 0.18,
+    LOOK_RANGE              = 35,
+    LOOK_CLAMP_TO_WALL      = true,
+    LOOK_HIT_RADIUS         = 1.5,
+
+    -- Sniper dot at the tip of the look beam
+    LOOK_DOT_ENABLED  = true,
+    LOOK_DOT_SIZE     = 0.35,
+    LOOK_DOT_ALPHA    = 0.1,
+
+    TEAM_CHECK      = true,
+    IGNORE_WATER    = true,
+    UPDATE_INTERVAL = 0,      -- 0 = every frame
+    MAX_DISTANCE    = 0,      -- 0 = no limit
+
+    KILL_KEYBIND = Enum.KeyCode.F10,
+}
+
+--------------------------------------------------------------------------------
+-- MODULE
+--------------------------------------------------------------------------------
+local ViewLines = {}
+ViewLines.__index = ViewLines
+
+local function eyeOf(head)
+    local look = head.CFrame.LookVector
+    return head.Position + look * (head.Size.Z * 0.5), look
+end
+
+function ViewLines.new(overrides)
+    local self = setmetatable({}, ViewLines)
+    self.config = {}
+    for k, v in pairs(DEFAULTS) do self.config[k] = v end
+    if overrides then
+        for k, v in pairs(overrides) do self.config[k] = v end
+    end
+    self._entries     = {}
+    self._connections = {}
+    self._running     = false
+    self._lastUpdate  = 0
+    return self
+end
+
+--------------------------------------------------------------------------------
+-- INTERNALS
+--------------------------------------------------------------------------------
+function ViewLines:_track(conn)
+    self._connections[#self._connections + 1] = conn
+    return conn
+end
+
+function ViewLines:_rayParams(ignoreChar)
+    local p = RaycastParams.new()
+    p.FilterType = Enum.RaycastFilterType.Exclude
+    p.FilterDescendantsInstances = { ignoreChar, Camera }
+    p.IgnoreWater = self.config.IGNORE_WATER
+    return p
+end
+
+function ViewLines:_isHostile(player)
+    if player == LocalPlayer then return false end
+    if self.config.TEAM_CHECK
+        and player.Team and LocalPlayer.Team
+        and player.Team == LocalPlayer.Team
+    then
+        return false
+    end
+    return true
+end
+
+function ViewLines:_getSamplePoints(char)
+    local pts = {}
+    for _, name in ipairs(self.config.SAMPLE_PARTS) do
+        local part = char:FindFirstChild(name)
+        if part and part:IsA("BasePart") then
+            pts[#pts + 1] = {
+                pos    = part.Position,
+                radius = math.max(part.Size.X, part.Size.Y, part.Size.Z) * 0.5,
+            }
+        end
+    end
+    if #pts == 0 then
+        local root = char:FindFirstChild("HumanoidRootPart")
+        if root then
+            pts[1] = { pos = root.Position, radius = 1.5 }
+        end
+    end
+    return pts
+end
+
+function ViewLines:_cleanup(player)
+    local e = self._entries[player]
+    if not e then return end
+    for _, obj in ipairs({
+        e.sightBeam, e.sightAttViewer, e.sightAttMine,
+        e.lookBeam,  e.lookAttFace,    e.lookAttTip,
+        e.dotPart,
+    }) do
+        if obj then obj:Destroy() end
+    end
+    self._entries[player] = nil
+end
+
+function ViewLines:_cleanupAll()
+    local list = {}
+    for p in pairs(self._entries) do list[#list + 1] = p end
+    for _, p in ipairs(list) do self:_cleanup(p) end
+end
+
+function ViewLines:_ensureEntry(player, myRoot)
+    local char = player.Character
+    if not char then return nil end
+    local head = char:FindFirstChild("Head")
+    if not head then return nil end
+
+    local e = self._entries[player]
+    if e
+        and e.viewerHead == head
+        and e.myRoot     == myRoot
+        and e.viewerHead.Parent
+        and e.myRoot.Parent
+    then
+        return e
+    end
+    if e then self:_cleanup(player) end
+
+    local cfg = self.config
+
+    -- --- Sight beam ---
+    local sa = Instance.new("Attachment"); sa.Parent = head
+    local sb = Instance.new("Attachment"); sb.Parent = myRoot
+
+    local sight = Instance.new("Beam")
+    sight.Attachment0    = sa
+    sight.Attachment1    = sb
+    sight.FaceCamera     = true
+    sight.LightEmission  = 1
+    sight.LightInfluence = 0
+    sight.Width0         = cfg.BLOCKED_WIDTH
+    sight.Width1         = cfg.BLOCKED_WIDTH
+    sight.Color          = ColorSequence.new(cfg.BLOCKED_COLOR)
+    sight.Transparency   = NumberSequence.new(cfg.BLOCKED_TRANSPARENCY)
+    sight.Parent         = workspace
+
+    -- --- Look beam (attachments in head-local space) ---
+    local lookFace = Instance.new("Attachment")
+    lookFace.Position = Vector3.new(0, 0, -head.Size.Z * 0.5)
+    lookFace.Parent   = head
+
+    local lookTip = Instance.new("Attachment")
+    lookTip.Position = Vector3.new(0, 0, -head.Size.Z * 0.5 - cfg.LOOK_RANGE)
+    lookTip.Parent   = head
+
+    local lookBeam = Instance.new("Beam")
+    lookBeam.Attachment0    = lookFace
+    lookBeam.Attachment1    = lookTip
+    lookBeam.FaceCamera     = true
+    lookBeam.LightEmission  = 1
+    lookBeam.LightInfluence = 0
+    lookBeam.Width0         = cfg.LOOK_WIDTH
+    lookBeam.Width1         = cfg.LOOK_WIDTH
+    lookBeam.Color          = ColorSequence.new(cfg.LOOK_COLOR)
+    lookBeam.Transparency   = NumberSequence.new(cfg.LOOK_TRANSPARENCY_NEAR)
+    lookBeam.Parent         = workspace
+
+    -- --- Sniper dot ---
+    local dotPart
+    if cfg.LOOK_DOT_ENABLED then
+        dotPart = Instance.new("Part")
+        dotPart.Shape        = Enum.PartType.Ball
+        dotPart.Size         = Vector3.new(cfg.LOOK_DOT_SIZE, cfg.LOOK_DOT_SIZE, cfg.LOOK_DOT_SIZE)
+        dotPart.Anchored     = true
+        dotPart.CanCollide   = false
+        dotPart.CanQuery     = false
+        dotPart.CanTouch     = false
+        dotPart.CastShadow   = false
+        dotPart.Material     = Enum.Material.Neon
+        dotPart.Color        = cfg.LOOK_COLOR
+        dotPart.Transparency = cfg.LOOK_DOT_ALPHA
+        dotPart.Parent       = workspace
+    end
+
+    local entry = {
+        sightBeam = sight, sightAttViewer = sa, sightAttMine = sb,
+        viewerHead = head, myRoot = myRoot,
+        lookBeam = lookBeam, lookAttFace = lookFace, lookAttTip = lookTip,
+        dotPart  = dotPart,
+    }
+    self._entries[player] = entry
+    return entry
+end
+
+--------------------------------------------------------------------------------
+-- VISIBILITY FRACTION
+--------------------------------------------------------------------------------
+function ViewLines:_evaluateVisibility(viewerChar, viewerHead, myChar, mySamples)
+    if #mySamples == 0 then return 0 end
+
+    local eye, look = eyeOf(viewerHead)
+    local params    = self:_rayParams(viewerChar)
+    local cosHalf   = math.cos(math.rad(self.config.FOV_DEGREES * 0.5))
+    local hits      = 0
+
+    for _, s in ipairs(mySamples) do
+        local toSample = s.pos - eye
+        local dist     = toSample.Magnitude
+        if dist > 0.001 then
+            local dir = toSample / dist
+            if look:Dot(dir) >= cosHalf then
+                local res = workspace:Raycast(eye, toSample, params)
+                if res == nil or res.Instance:IsDescendantOf(myChar) then
+                    hits += 1
+                end
+            end
+        end
+    end
+    return hits / #mySamples
+end
+
+--------------------------------------------------------------------------------
+-- LOOK BEAM HIT TEST (capsule vs. my sample points)
+--------------------------------------------------------------------------------
+function ViewLines:_lookBeamHitsMe(viewerChar, viewerHead, myChar, mySamples)
+    local eye, look = eyeOf(viewerHead)
+    local range     = self.config.LOOK_RANGE
+    local radius    = self.config.LOOK_HIT_RADIUS
+    local params    = self:_rayParams(viewerChar)
+
+    for _, s in ipairs(mySamples) do
+        local toSample = s.pos - eye
+        local t        = math.clamp(toSample:Dot(look), 0, range)
+        local closest  = eye + look * t
+        local d        = (s.pos - closest).Magnitude
+
+        if d <= s.radius + radius then
+            local res = workspace:Raycast(eye, s.pos - eye, params)
+            if res == nil or res.Instance:IsDescendantOf(myChar) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+--------------------------------------------------------------------------------
+-- LOOK GEOMETRY: tip clamp + dot placement. Returns (endWorld, length).
+--------------------------------------------------------------------------------
+function ViewLines:_updateLookGeometry(entry, viewerHead, viewerChar)
+    local cfg = self.config
+    local eye, look = eyeOf(viewerHead)
+
+    local length = cfg.LOOK_RANGE
+    if cfg.LOOK_CLAMP_TO_WALL then
+        local params = self:_rayParams(viewerChar)
+        local res = workspace:Raycast(eye, look * cfg.LOOK_RANGE, params)
+        if res then
+            length = (res.Position - eye).Magnitude
+        end
+    end
+
+    local endWorld = eye + look * length
+    entry.lookAttTip.Position = viewerHead.CFrame:PointToObjectSpace(endWorld)
+
+    if entry.dotPart then
+        entry.dotPart.CFrame = CFrame.new(endWorld)
+    end
+
+    return endWorld, length
+end
+
+--------------------------------------------------------------------------------
+-- APPEARANCE
+--------------------------------------------------------------------------------
+function ViewLines:_applySightAppearance(beam, vis)
+    local cfg = self.config
+    local color, transparency, width
+
+    if vis >= 1 then
+        color        = cfg.VISIBLE_COLOR
+        transparency = cfg.VISIBLE_TRANSPARENCY
+        width        = cfg.VISIBLE_WIDTH
+    elseif vis <= 0 then
+        color        = cfg.BLOCKED_COLOR
+        transparency = cfg.BLOCKED_TRANSPARENCY
+        width        = cfg.BLOCKED_WIDTH
+    else
+        color        = cfg.BLOCKED_COLOR:Lerp(cfg.VISIBLE_COLOR, vis)
+        transparency = cfg.BLOCKED_TRANSPARENCY
+            + (cfg.VISIBLE_TRANSPARENCY - cfg.BLOCKED_TRANSPARENCY) * vis
+        width        = cfg.BLOCKED_WIDTH
+            + (cfg.VISIBLE_WIDTH - cfg.BLOCKED_WIDTH) * vis
+    end
+
+    beam.Color        = ColorSequence.new(color)
+    beam.Transparency = NumberSequence.new(transparency)
+    beam.Width0       = width
+    beam.Width1       = width
+end
+
+function ViewLines:_applyLookAppearance(entry, hit, length)
+    local cfg   = self.config
+    local color = hit and cfg.LOOK_HIT_COLOR or cfg.LOOK_COLOR
+
+    entry.lookBeam.Color = ColorSequence.new(color)
+
+    -- Fade gradient: transparency at the tip is proportional to how much
+    -- of LOOK_RANGE this beam actually spans. A 5-stud beam inside a 35-stud
+    -- range is barely faded; a 35-stud beam fades all the way to FAR.
+    local ratio = math.clamp(length / math.max(cfg.LOOK_RANGE, 1e-3), 0, 1)
+    local tipT  = cfg.LOOK_TRANSPARENCY_NEAR
+                + (cfg.LOOK_TRANSPARENCY_FAR - cfg.LOOK_TRANSPARENCY_NEAR) * ratio
+
+    entry.lookBeam.Transparency = NumberSequence.new({
+        NumberSequenceKeypoint.new(0, cfg.LOOK_TRANSPARENCY_NEAR),
+        NumberSequenceKeypoint.new(1, tipT),
+    })
+
+    if entry.dotPart then
+        entry.dotPart.Color = color
+    end
+end
+
+--------------------------------------------------------------------------------
+-- PUBLIC: update()
+--------------------------------------------------------------------------------
+function ViewLines:update()
+    local cfg = self.config
+
+    local myChar = LocalPlayer.Character
+    local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+    if not myChar or not myRoot then
+        self:_cleanupAll()
+        return
+    end
+
+    local mySamples = self:_getSamplePoints(myChar)
+
+    -- Stale sweep
+    local stale = {}
+    for player, e in pairs(self._entries) do
+        if not player.Parent
+            or not player.Character
+            or e.myRoot ~= myRoot
+            or not e.viewerHead.Parent
+            or not e.myRoot.Parent
+        then
+            stale[#stale + 1] = player
+        end
+    end
+    for _, player in ipairs(stale) do
+        self:_cleanup(player)
+    end
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            if not self:_isHostile(player) then
+                self:_cleanup(player)
+            else
+                local theirChar = player.Character
+                if theirChar then
+                    local distOk = true
+                    if cfg.MAX_DISTANCE > 0 then
+                        local theirRoot = theirChar:FindFirstChild("HumanoidRootPart")
+                        if theirRoot then
+                            distOk = (myRoot.Position - theirRoot.Position).Magnitude
+                                     <= cfg.MAX_DISTANCE
+                        end
+                    end
+
+                    if distOk then
+                        local e = self:_ensureEntry(player, myRoot)
+                        if e then
+                            local head = e.viewerHead
+
+                            -- Look beam: geometry + hit + appearance
+                            local _, length = self:_updateLookGeometry(e, head, theirChar)
+                            local hit = self:_lookBeamHitsMe(
+                                theirChar, head, myChar, mySamples
+                            )
+                            self:_applyLookAppearance(e, hit, length)
+
+                            -- Sight beam: hide it when the look beam already
+                            -- says "I'm being aimed at".
+                            if cfg.HIDE_SIGHT_WHEN_AIMED and hit then
+                                e.sightBeam.Enabled = false
+                            else
+                                e.sightBeam.Enabled = true
+                                local vis = self:_evaluateVisibility(
+                                    theirChar, head, myChar, mySamples
+                                )
+                                self:_applySightAppearance(e.sightBeam, vis)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+--------------------------------------------------------------------------------
+-- PUBLIC: start / stop / setConfig / destroy
+--------------------------------------------------------------------------------
+function ViewLines:start()
+    if self._running then return end
+    self._running = true
+
+    self:_track(RunService.Heartbeat:Connect(function()
+        local cfg = self.config
+        if cfg.UPDATE_INTERVAL > 0 then
+            local now = os.clock()
+            if now - self._lastUpdate < cfg.UPDATE_INTERVAL then return end
+            self._lastUpdate = now
+        end
+        self:update()
+    end))
+
+    self:_track(LocalPlayer.CharacterAdded:Connect(function()
+        self:_cleanupAll()
+    end))
+
+    self:_track(Players.PlayerRemoving:Connect(function(player)
+        self:_cleanup(player)
+    end))
+
+    self:_track(UserInputService.InputBegan:Connect(function(input, gp)
+        if gp then return end
+        local key = self.config.KILL_KEYBIND
+        if key and input.KeyCode == key then
+            self:stop()
+        end
+    end))
+end
+
+function ViewLines:stop()
+    if not self._running then return end
+    self._running = false
+
+    for _, c in ipairs(self._connections) do
+        pcall(function() c:Disconnect() end)
+    end
+    self._connections = {}
+    self:_cleanupAll()
+end
+
+function ViewLines:destroy()
+    self:stop()
+end
+
+function ViewLines:setConfig(partial)
+    if not partial then return end
+    for k, v in pairs(partial) do
+        self.config[k] = v
+    end
+end
+
+function ViewLines:isRunning()
+    return self._running
+end
+
+return ViewLines
