@@ -1,0 +1,303 @@
+--[[
+    ScreenEdgeIndicators — off-screen direction arrows
+    Projects world-space targets to the screen edge with an arrow
+    pointing toward them. Designed to be fed by ViewLines: add a
+    target when a viewer can see you but is outside your viewport.
+
+    Usage:
+        local SEI = loadstring(game:HttpGet(URL))()
+        local sei = SEI.new({ PADDING = 80 })
+        sei:addTarget(player, { Color = Color3.fromRGB(255, 40, 40) })
+        -- each frame:
+        sei:update()
+        -- when the condition no longer holds:
+        sei:removeTarget(player)
+]]
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+
+local LocalPlayer = Players.LocalPlayer
+local Camera      = workspace.CurrentCamera
+
+--------------------------------------------------------------------------------
+-- DEFAULTS
+--------------------------------------------------------------------------------
+local DEFAULTS = {
+    PADDING         = 64,        -- inset from screen edge, in pixels
+    ARROW_SIZE      = 36,        -- arrow bounding box size, in pixels
+    ARROW_COLOR     = Color3.fromRGB(255, 45, 45),
+    ARROW_ALPHA     = 0.15,
+    SHOW_NAME       = true,
+    NAME_SIZE       = 14,
+    NAME_COLOR      = Color3.fromRGB(255, 255, 255),
+    NAME_ALPHA      = 0.1,
+    UPDATE_INTERVAL = 0,         -- 0 = every frame
+    KILL_KEYBIND    = nil,       -- set to a KeyCode to enable a kill switch
+}
+
+--------------------------------------------------------------------------------
+-- MODULE
+--------------------------------------------------------------------------------
+local ScreenEdgeIndicators = {}
+ScreenEdgeIndicators.__index = ScreenEdgeIndicators
+
+function ScreenEdgeIndicators.new(overrides)
+    local self = setmetatable({}, ScreenEdgeIndicators)
+    self.config = {}
+    for k, v in pairs(DEFAULTS) do self.config[k] = v end
+    if overrides then
+        for k, v in pairs(overrides) do self.config[k] = v end
+    end
+
+    self._targets     = {}   -- [player] = { frame, arrow, label, config }
+    self._connections = {}
+    self._running     = false
+    self._lastUpdate  = 0
+
+    -- Build the ScreenGui
+    local gui = Instance.new("ScreenGui")
+    gui.Name          = "ScreenEdgeIndicators"
+    gui.ResetOnSpawn  = false
+    gui.IgnoreGuiInset = true
+    gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    gui.Parent        = LocalPlayer:WaitForChild("PlayerGui")
+    self._gui = gui
+
+    return self
+end
+
+--------------------------------------------------------------------------------
+-- INTERNALS
+--------------------------------------------------------------------------------
+function ScreenEdgeIndicators:_track(conn)
+    self._connections[#self._connections + 1] = conn
+    return conn
+end
+
+-- Build one arrow frame (a triangle via an ImageLabel, or a rotated Frame).
+function ScreenEdgeIndicators:_buildArrow(cfg)
+    local frame = Instance.new("Frame")
+    frame.Name            = "ArrowRoot"
+    frame.Size            = UDim2.fromOffset(self.config.ARROW_SIZE, self.config.ARROW_SIZE)
+    frame.AnchorPoint     = Vector2.new(0.5, 0.5)
+    frame.BackgroundTransparency = 1
+    frame.Parent          = self._gui
+
+    -- Use a triangle image for a clean arrow. Replace the asset id if you
+    -- want a different shape; the rotation math works regardless.
+    local arrow = Instance.new("ImageLabel")
+    arrow.Name            = "Arrow"
+    arrow.Size            = UDim2.fromScale(1, 1)
+    arrow.BackgroundTransparency = 1
+    arrow.Image           = "rbxassetid://3926305904"  -- triangle icon
+    arrow.ImageColor3     = cfg.Color or self.config.ARROW_COLOR
+    arrow.ImageTransparency = cfg.Alpha or self.config.ARROW_ALPHA
+    arrow.Rotation        = 0
+    arrow.Parent          = frame
+
+    local label
+    if self.config.SHOW_NAME then
+        label = Instance.new("TextLabel")
+        label.Name                  = "Name"
+        label.AnchorPoint           = Vector2.new(0.5, 0)
+        label.Position              = UDim2.new(0.5, 0, 1, 4)
+        label.Size                  = UDim2.fromOffset(120, self.config.NAME_SIZE + 6)
+        label.BackgroundTransparency = 1
+        label.Font                  = Enum.Font.GothamMedium
+        label.TextSize              = self.config.NAME_SIZE
+        label.TextColor3            = self.config.NAME_COLOR
+        label.TextTransparency      = self.config.NAME_ALPHA
+        label.Text                  = ""
+        label.Parent                = frame
+    end
+
+    return frame, arrow, label
+end
+
+function ScreenEdgeIndicators:_destroyTarget(player)
+    local entry = self._targets[player]
+    if not entry then return end
+    if entry.frame then entry.frame:Destroy() end
+    self._targets[player] = nil
+end
+
+--------------------------------------------------------------------------------
+-- PUBLIC: target management
+--------------------------------------------------------------------------------
+-- opts can override ARROW_COLOR, ARROW_ALPHA, and NAME_ALPHA per target.
+function ScreenEdgeIndicators:addTarget(player, opts)
+    if self._targets[player] then return end
+    if player == LocalPlayer then return end
+
+    opts = opts or {}
+    local frame, arrow, label = self:_buildArrow(opts)
+    self._targets[player] = {
+        frame = frame,
+        arrow = arrow,
+        label = label,
+        color = opts.Color or self.config.ARROW_COLOR,
+        alpha = opts.Alpha or self.config.ARROW_ALPHA,
+    }
+end
+
+function ScreenEdgeIndicators:removeTarget(player)
+    self:_destroyTarget(player)
+end
+
+function ScreenEdgeIndicators:clearTargets()
+    local list = {}
+    for p in pairs(self._targets) do list[#list + 1] = p end
+    for _, p in ipairs(list) do self:_destroyTarget(p) end
+end
+
+--------------------------------------------------------------------------------
+-- PUBLIC: update
+--------------------------------------------------------------------------------
+function ScreenEdgeIndicators:update()
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+
+    local viewport = cam.ViewportSize
+    if viewport.X <= 0 or viewport.Y <= 0 then return end
+
+    local pad = self.config.PADDING
+    local halfX = viewport.X * 0.5
+    local halfY = viewport.Y * 0.5
+
+    for player, entry in pairs(self._targets) do
+        -- Resolve a world anchor: prefer HumanoidRootPart, fall back to Head.
+        local char = player.Character
+        local anchor
+        if char then
+            anchor = char:FindFirstChild("HumanoidRootPart")
+                  or char:FindFirstChild("Head")
+        end
+
+        if not anchor then
+            entry.frame.Visible = false
+        else
+            -- Project world position to viewport.
+            local screenPos, onScreen = cam:WorldToViewportPoint(anchor.Position)
+
+            -- Behind-camera check: WorldToViewportPoint can report a
+            -- positive Z even when the point is behind the camera in some
+            -- edge cases, so we test the camera-space Z explicitly.
+            local camSpace = cam.CFrame:PointToObjectSpace(anchor.Position)
+            local behind   = camSpace.Z >= 0
+
+            local isOffscreen = (not onScreen) or behind
+
+            -- Also treat "clamped to the very edge" as offscreen so the
+            -- arrow appears the instant the target leaves the safe area.
+            local clampedX = math.clamp(screenPos.X, pad, viewport.X - pad)
+            local clampedY = math.clamp(screenPos.Y, pad, viewport.Y - pad)
+            local atEdge   = (clampedX ~= screenPos.X) or (clampedY ~= screenPos.Y)
+
+            if isOffscreen or atEdge then
+                entry.frame.Visible = true
+
+                -- Direction in camera space. Using the object-space vector
+                -- avoids the perspective-divide sign flip that a raw
+                -- WorldToViewportPoint can produce behind the camera.
+                local toTarget = anchor.Position - cam.CFrame.Position
+                local obj      = cam.CFrame:VectorToObjectSpace(toTarget)
+
+                -- Screen-space 2D direction: right = X, up = Y (Roblox
+                -- screen Y grows downward, so we flip it when rotating).
+                local dir2D = Vector2.new(obj.X, obj.Y)
+                if dir2D.Magnitude < 1e-4 then
+                    dir2D = Vector2.new(0, 1)   -- fallback: straight up
+                end
+                dir2D = dir2D.Unit
+
+                -- Find the intersection of the ray from screen centre in
+                -- dir2D with the padded screen rectangle. This is the
+                -- canonical edge-clamp method: check both axes, take the
+                -- smaller parameter.
+                local tX = halfX / math.max(math.abs(dir2D.X), 1e-4)
+                local tY = halfY / math.max(math.abs(dir2D.Y), 1e-4)
+                local t  = math.min(tX, tY)
+
+                local edgeX = halfX + dir2D.X * t
+                local edgeY = halfY - dir2D.Y * t   -- flip for screen Y
+
+                -- Clamp to the padded safe area as a belt-and-braces.
+                edgeX = math.clamp(edgeX, pad, viewport.X - pad)
+                edgeY = math.clamp(edgeY, pad, viewport.Y - pad)
+
+                entry.frame.Position = UDim2.fromOffset(edgeX, edgeY)
+
+                -- Rotate the arrow to point toward the target. The base
+                -- image points "up" at rotation 0, so we compute the
+                -- screen-space angle from up.
+                local angle = math.deg(math.atan2(dir2D.X, dir2D.Y))
+                entry.arrow.Rotation = angle
+
+                if entry.label then
+                    entry.label.Text = player.DisplayName or player.Name
+                end
+            else
+                entry.frame.Visible = false
+            end
+        end
+    end
+end
+
+--------------------------------------------------------------------------------
+-- PUBLIC: lifecycle
+--------------------------------------------------------------------------------
+function ScreenEdgeIndicators:start()
+    if self._running then return end
+    self._running = true
+
+    self:_track(RunService.RenderStepped:Connect(function()
+        local cfg = self.config
+        if cfg.UPDATE_INTERVAL > 0 then
+            local now = os.clock()
+            if now - self._lastUpdate < cfg.UPDATE_INTERVAL then return end
+            self._lastUpdate = now
+        end
+        self:update()
+    end))
+
+    self:_track(Players.PlayerRemoving:Connect(function(player)
+        self:_destroyTarget(player)
+    end))
+
+    if self.config.KILL_KEYBIND then
+        self:_track(UserInputService.InputBegan:Connect(function(input, gp)
+            if gp then return end
+            if input.KeyCode == self.config.KILL_KEYBIND then
+                self:stop()
+            end
+        end))
+    end
+end
+
+function ScreenEdgeIndicators:stop()
+    if not self._running then return end
+    self._running = false
+    for _, c in ipairs(self._connections) do
+        pcall(function() c:Disconnect() end)
+    end
+    self._connections = {}
+    self:clearTargets()
+    if self._gui then
+        self._gui:Destroy()
+    end
+end
+
+function ScreenEdgeIndicators:destroy()
+    self:stop()
+end
+
+function ScreenEdgeIndicators:setConfig(partial)
+    if not partial then return end
+    for k, v in pairs(partial) do
+        self.config[k] = v
+    end
+end
+
+return ScreenEdgeIndicators
