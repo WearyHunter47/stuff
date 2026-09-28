@@ -112,6 +112,9 @@ local DEFAULTS = {
     EDGE_NAME_COLOR        = Color3.fromRGB(255, 255, 255),  -- fallback only
     EDGE_NAME_ALPHA        = 0.9,    -- baseline (not being viewed)
     EDGE_NAME_ALPHA_VIEWED = 0.0,    -- fully visible when viewer is aiming at us
+    -- Visibility fraction at which the nametag flips to NAME_ALPHA_VIEWED.
+    -- 0.0 = any visibility counts. 0.5 = needs half the body exposed.
+    EDGE_NAME_SIGHT_THRESHOLD = 0.1,
 }
 
 --------------------------------------------------------------------------------
@@ -225,6 +228,7 @@ function ScreenEdgeIndicators:addTarget(player, opts)
     local existing = self._targets[player]
     if existing then
         existing.viewing   = opts.Viewing and true or false
+        existing.aiming    = opts.Aiming  and true or false
         existing.nameColor = opts.NameColor or existing.nameColor
         if opts.Color then existing.color = opts.Color end
         if opts.Alpha then existing.alpha = opts.Alpha end
@@ -240,6 +244,7 @@ function ScreenEdgeIndicators:addTarget(player, opts)
         alpha     = opts.Alpha     or self.config.ARROW_ALPHA,
         nameColor = opts.NameColor or self.config.NAME_COLOR,
         viewing   = opts.Viewing   and true or false,
+        aiming    = opts.Aiming    and true or false,
     }
 end
 
@@ -322,11 +327,15 @@ function ScreenEdgeIndicators:update()
                 if entry.label then
                     entry.label.Text = player.DisplayName or player.Name
                     entry.label.TextColor3 = entry.nameColor
+
+                    -- Opacity: flips when the viewer can see us at all
+                    -- (look beam OR sight beam above threshold).
                     entry.label.TextTransparency = entry.viewing
                         and self.config.NAME_ALPHA_VIEWED
                         or  self.config.NAME_ALPHA
 
-                    local nameSize = entry.viewing
+                    -- Size: only boosted when they're actively aiming at us.
+                    local nameSize = entry.aiming
                         and self.config.NAME_SIZE_VIEWED
                         or  self.config.NAME_SIZE
                     entry.label.TextSize = nameSize
@@ -724,13 +733,17 @@ function ViewLines:_updateEdgeIndicator(player, theirChar, hit, vis)
     local behind       = camSpace.Z >= 0
 
     if (not onScreen) or behind then
+        -- Name opacity flips on EITHER signal: look beam hit, OR the
+        -- sight beam shows they can see enough of us. Size boost only
+        -- follows the look beam (active aiming).
+        local sightSeen = vis >= cfg.EDGE_NAME_SIGHT_THRESHOLD
+
         self._edgeIndicators:addTarget(player, {
-            -- Arrow: red when they're aiming at us, blue otherwise
             Color     = hit and cfg.EDGE_ARROW_ALERT_COLOR or cfg.EDGE_ARROW_COLOR,
             Alpha     = cfg.EDGE_ARROW_ALPHA,
-            -- Name: team color; `Viewing` drives the transparency + size flip
             NameColor = teamColorOf(player),
-            Viewing   = hit,
+            Viewing   = hit or sightSeen,   -- opacity
+            Aiming    = hit,                -- size boost
         })
     else
         self._edgeIndicators:removeTarget(player)
