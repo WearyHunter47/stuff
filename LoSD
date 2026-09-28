@@ -144,7 +144,7 @@ function ScreenEdgeIndicators:_buildArrow(cfg)
     arrow.Name                   = "Arrow"
     arrow.Size                   = UDim2.fromScale(1, 1)
     arrow.BackgroundTransparency = 1
-    arrow.Image                  = "rbxassetid://102121711"
+    arrow.Image                  = "rbxassetid://105578389638723"
     arrow.ImageColor3            = cfg.Color or self.config.ARROW_COLOR
     arrow.ImageTransparency      = cfg.Alpha or self.config.ARROW_ALPHA
     arrow.Rotation               = 0
