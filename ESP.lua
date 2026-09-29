@@ -9,10 +9,7 @@
       • Camera-center override opacity
       • Healthbar fill, background, and number opacity (mirrors nametag)
 
-    Screen-size scaling applies ONLY to the healthbar. The nametag text
-    stays at fixed pixel size for consistent readability at any distance;
-    the healthbar grows/shrinks with the target's projected on-screen
-    height, like a 2D box ESP.
+    Screen-size scaling applies ONLY to the healthbar.
 
     Usage:
         local ESP = loadstring(game:HttpGet(URL))()
@@ -32,7 +29,6 @@ local Camera      = workspace.CurrentCamera
 -- DEFAULTS
 --------------------------------------------------------------------------------
 local DEFAULTS = {
-    -- Core toggles
     ESPEnabled          = true,
     ESPShowText         = true,
     ESPTextSize         = 13,
@@ -44,51 +40,47 @@ local DEFAULTS = {
     ESPWhitelist = {},
     ESPBlacklist = {},
 
-    -- Nametag format
     ESP_NAME_FORMAT = "Vertical",   -- "Horizontal" | "Vertical"
+    ESP_NAME_WIDTH  = 150,          -- nametag label width (px)
 
-    -- ViewLines integration
+    -- Billboard anchoring
+    ESP_ANCHOR_PART  = "HumanoidRootPart",   -- "HumanoidRootPart"|"Head"|"UpperTorso"|"Torso"|"LowerTorso"
+    ESP_STUDS_OFFSET = Vector3.new(0, 2, 0),
+
     INTEGRATION_ENABLED = true,
     SIGHT_THRESHOLD     = 0.1,
 
-    -- Highlight fill transparency by state
     HL_BASE_TRANSPARENCY  = 0.7,
     HL_SIGHT_TRANSPARENCY = 0.4,
     HL_LOOK_TRANSPARENCY  = 0.1,
 
-    -- Nametag opacity by state
     NT_ALPHA_BASE  = 0.6,
     NT_ALPHA_SIGHT = 0.3,
     NT_ALPHA_LOOK  = 0.0,
 
-    -- Nametag size by state (fixed pixels; never scaled)
     NT_SIZE_BASE  = 13,
     NT_SIZE_SIGHT = 16,
     NT_SIZE_LOOK  = 20,
 
-    -- Bold on look
     NT_BOLD_ON_LOOK = true,
 
-    -- Camera-center override (applies to nametag AND healthbar)
     CENTER_OVERRIDE_ENABLED = true,
     CENTER_FALLOFF_DEGREES  = 45,
     CENTER_MAX_ALPHA        = 0.0,
 
-    -- Screen-size scaling — HEALTHBAR ONLY
     SCALE_ENABLED          = true,
     SCALE_REFERENCE_HEIGHT = 140,
     SCALE_MIN              = 0.5,
     SCALE_MAX              = 2.0,
 
-    -- Healthbar geometry (pre-scale; multiplied by the scale factor)
     HB_ENABLED           = true,
-    HB_POSITION          = "Bottom",   -- "Top" | "Bottom" | "Left" | "Right"
+    HB_POSITION          = "Bottom",
     HB_LENGTH            = 90,
     HB_THICKNESS         = 5,
-    HB_GAP               = 4,          -- fixed pixels, not scaled
+    HB_GAP               = 4,
 
     HB_BG_COLOR          = Color3.fromRGB(20, 20, 20),
-    HB_FILL_COLOR        = nil,        -- nil = auto health gradient (green→red)
+    HB_FILL_COLOR        = nil,
 
     HB_ROUNDED           = true,
     HB_CORNER_RADIUS     = 3,
@@ -97,7 +89,6 @@ local DEFAULTS = {
     HB_BORDER_COLOR      = Color3.fromRGB(0, 0, 0),
     HB_BORDER_THICKNESS  = 1,
 
-    -- Healthbar dynamic opacity (mirrors nametag pipeline)
     HB_ALPHA_BASE  = 0.3,
     HB_ALPHA_SIGHT = 0.15,
     HB_ALPHA_LOOK  = 0.0,
@@ -105,19 +96,16 @@ local DEFAULTS = {
     HB_BG_EXTRA_TRANSPARENCY     = 0.15,
     HB_NUMBER_EXTRA_TRANSPARENCY = 0.0,
 
-    -- Static fallbacks (only used when INTEGRATION_ENABLED = false)
     HB_BG_TRANSPARENCY   = 0.2,
     HB_FILL_TRANSPARENCY = 0.0,
     HB_NUMBER_ALPHA      = 0.0,
 
-    -- Healthbar number
     HB_SHOW_NUMBER       = true,
     HB_NUMBER_POSITION   = "Inside",
     HB_NUMBER_SIZE       = 12,
     HB_NUMBER_COLOR      = Color3.fromRGB(255, 255, 255),
     HB_NUMBER_SHOW_MAX   = false,
 
-    -- Lifecycle
     KILL_KEYBIND    = nil,
     UPDATE_INTERVAL = 0,
 }
@@ -176,9 +164,6 @@ function ESP.new(overrides)
     return self
 end
 
---------------------------------------------------------------------------------
--- INTERNALS
---------------------------------------------------------------------------------
 function ESP:_track(conn)
     self._connections[#self._connections + 1] = conn
     return conn
@@ -250,8 +235,6 @@ function ESP:_getNameColor(player)
     return color
 end
 
--- Compute a scale factor from the target's projected height on screen.
--- Applied to healthbar dimensions only; the nametag is never scaled.
 function ESP:_computeScreenScale(char, root)
     if not self.config.SCALE_ENABLED then return 1 end
 
@@ -273,7 +256,6 @@ function ESP:_computeScreenScale(char, root)
     return math.clamp(raw, self.config.SCALE_MIN, self.config.SCALE_MAX)
 end
 
--- Resolve the dynamic alpha for both nametag and healthbar.
 function ESP:_resolveAlphas(hit, sightSeen, rootPos)
     local cfg = self.config
 
@@ -308,9 +290,6 @@ function ESP:_resolveAlphas(hit, sightSeen, rootPos)
     return ntAlpha, hbAlpha
 end
 
--- Compute BillboardGui and element layout.
--- textW / textH / nameH / subH come from the nametag's *unscaled* size.
--- hb.len / hb.thick are multiplied by the scale factor.
 function ESP:_computeLayout(scale)
     local cfg = self.config
     local ntSize = self._activeNtSize or cfg.NT_SIZE_BASE
@@ -318,14 +297,14 @@ function ESP:_computeLayout(scale)
     local nameH = ntSize + 6
     local subH  = (cfg.ESP_NAME_FORMAT == "Vertical") and (ntSize + 4) or 0
     local textH = nameH + subH
-    local textW = 220   -- fixed; nametag never scales
+    local textW = cfg.ESP_NAME_WIDTH
 
     local hb = {
         enabled = cfg.HB_ENABLED,
         pos     = cfg.HB_POSITION,
         len     = cfg.HB_LENGTH    * scale,
         thick   = cfg.HB_THICKNESS * scale,
-        gap     = cfg.HB_GAP,   -- fixed pixel gap between text and bar
+        gap     = cfg.HB_GAP,
     }
 
     local bbW, bbH
@@ -334,7 +313,7 @@ function ESP:_computeLayout(scale)
     elseif hb.pos == "Top" or hb.pos == "Bottom" then
         bbW = math.max(textW, hb.len)
         bbH = textH + hb.thick + hb.gap
-    else -- Left or Right
+    else
         bbW = textW + hb.thick + hb.gap
         bbH = math.max(textH, hb.len)
     end
@@ -356,8 +335,8 @@ function ESP:_createESP(player)
 
     local billboard = Instance.new("BillboardGui")
     billboard.AlwaysOnTop = true
-    billboard.StudsOffset = Vector3.new(0, 3, 0)
-    billboard.Size        = UDim2.fromOffset(220, 60)
+    billboard.StudsOffset = cfg.ESP_STUDS_OFFSET
+    billboard.Size        = UDim2.fromOffset(cfg.ESP_NAME_WIDTH, 60)
 
     local nameLabel = Instance.new("TextLabel")
     nameLabel.BackgroundTransparency = 1
@@ -384,7 +363,6 @@ function ESP:_createESP(player)
     subLabel.Visible                = (cfg.ESP_NAME_FORMAT == "Vertical")
     subLabel.Parent                 = billboard
 
-    -- Healthbar background
     local hbBack = Instance.new("Frame")
     hbBack.BackgroundColor3       = cfg.HB_BG_COLOR
     hbBack.BackgroundTransparency = cfg.HB_BG_TRANSPARENCY
@@ -493,13 +471,11 @@ function ESP:_layout(obj, bbW, bbH, textW, textH, nameH, subH, hb, scale)
         hbY = 0
         hbW = hb.len
         hbH = hb.thick
-
         textX = (bbW - textW) * 0.5
         textY = hb.thick + hb.gap
     elseif hb.pos == "Bottom" then
         textX = (bbW - textW) * 0.5
         textY = 0
-
         hbX = (bbW - hb.len) * 0.5
         hbY = textH + hb.gap
         hbW = hb.len
@@ -509,20 +485,17 @@ function ESP:_layout(obj, bbW, bbH, textW, textH, nameH, subH, hb, scale)
         hbY = (bbH - hb.len) * 0.5
         hbW = hb.thick
         hbH = hb.len
-
         textX = hb.thick + hb.gap
         textY = (bbH - textH) * 0.5
     else -- Right
         textX = 0
         textY = (bbH - textH) * 0.5
-
         hbX = textW + hb.gap
         hbY = (bbH - hb.len) * 0.5
         hbW = hb.thick
         hbH = hb.len
     end
 
-    -- Nametag size is fixed (never scaled).
     local finalNtSize = self._activeNtSize or cfg.NT_SIZE_BASE
 
     obj.NameLabel.Position = UDim2.fromOffset(textX, textY)
@@ -542,7 +515,6 @@ function ESP:_layout(obj, bbW, bbH, textW, textH, nameH, subH, hb, scale)
         obj.HB_Back.Visible = false
     end
 
-    -- Corner radius scales with the healthbar only.
     if cfg.HB_ROUNDED then
         local corner = obj.HB_Back:FindFirstChildOfClass("UICorner")
         if corner then
@@ -582,7 +554,6 @@ function ESP:_updateHealthbar(obj, hp, maxHp, scale, hbAlpha)
         )
     end
 
-    -- Dynamic opacity (fill direct, background + extra, number + extra)
     if hbAlpha ~= nil then
         obj.HB_Fill.BackgroundTransparency = hbAlpha
         obj.HB_Back.BackgroundTransparency = math.clamp(
@@ -601,10 +572,7 @@ function ESP:_updateHealthbar(obj, hp, maxHp, scale, hbAlpha)
         else
             obj.HB_Number.TextTransparency = cfg.HB_NUMBER_ALPHA
         end
-    end
 
-    -- Number text + position (scaled along with the healthbar)
-    if obj.HB_Number then
         if cfg.HB_NUMBER_SHOW_MAX then
             obj.HB_Number.Text = string.format("%d/%d", math.floor(hp), math.floor(maxHp))
         else
@@ -681,12 +649,10 @@ function ESP:update()
                     withinRange = dist <= cfg.ESPMaxDistance
                 end
 
-                -- ViewLines state
                 local hit, vis = self:_getViewLinesState(player)
                 local sightSeen = cfg.INTEGRATION_ENABLED
                     and vis >= cfg.SIGHT_THRESHOLD
 
-                -- Highlight fill transparency
                 local fillT
                 if cfg.INTEGRATION_ENABLED then
                     if hit then
@@ -700,10 +666,8 @@ function ESP:update()
                     fillT = cfg.HL_BASE_TRANSPARENCY
                 end
 
-                -- Alphas
                 local ntAlpha, hbAlpha = self:_resolveAlphas(hit, sightSeen, root.Position)
 
-                -- Nametag size (fixed pixels; not scaled)
                 local ntSize
                 if cfg.INTEGRATION_ENABLED then
                     if hit then
@@ -730,15 +694,12 @@ function ESP:update()
                 local hpColor   = healthColor(hp)
                 local distColor = distanceColor(dist)
 
-                -- Screen-size scale (healthbar only)
                 local scale = self:_computeScreenScale(char, root)
 
-                -- Layout
                 local bbW, bbH, textW, textH, nameH, subH, hb =
                     self:_computeLayout(scale)
                 self:_layout(obj, bbW, bbH, textW, textH, nameH, subH, hb, scale)
 
-                -- Highlight
                 if self._espVisible and withinRange then
                     obj.Highlight.Adornee          = char
                     obj.Highlight.Enabled          = true
@@ -750,9 +711,11 @@ function ESP:update()
                     obj.Highlight.Adornee = nil
                 end
 
-                -- Text
                 if self._textVisible and cfg.ESPShowText then
-                    obj.Billboard.Parent  = root
+                    -- Anchor the billboard on the configured body part
+                    local anchorPart = char:FindFirstChild(cfg.ESP_ANCHOR_PART)
+                        or root
+                    obj.Billboard.Parent  = anchorPart
                     obj.Billboard.Enabled = true
 
                     obj.NameLabel.Font             = ntFont
