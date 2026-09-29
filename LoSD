@@ -335,19 +335,21 @@ function ScreenEdgeIndicators:update()
 end
 
 function ScreenEdgeIndicators:stop()
-    -- Unconditional cleanup: safe even if :start() was never called.
-    for _, c in ipairs(self._connections) do
-        pcall(function() c:Disconnect() end)
+    for i = #self._connections, 1, -1 do
+        local c = self._connections[i]
+        self._connections[i] = nil
+        if typeof(c) == "RBXScriptConnection" then
+            c:Disconnect()
+        end
     end
     self._connections = {}
-    self:clearTargets()
+    pcall(function() self:clearTargets() end)
     if self._gui then
         pcall(function() self._gui:Destroy() end)
         self._gui = nil
     end
     self._running = false
 end
-
 function ScreenEdgeIndicators:destroy()
     self:stop()
 end
@@ -894,11 +896,15 @@ function ViewLines:start()
 end
 
 function ViewLines:stop()
-    for _, c in ipairs(self._connections) do
-        pcall(function() c:Disconnect() end)
+    for i = #self._connections, 1, -1 do
+        local c = self._connections[i]
+        self._connections[i] = nil
+        if typeof(c) == "RBXScriptConnection" then
+            c:Disconnect()
+        end
     end
     self._connections = {}
-    self:_cleanupAll()
+    pcall(function() self:_cleanupAll() end)
     pcall(function() self._edgeIndicators:stop() end)
     self._running = false
 end
