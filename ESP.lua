@@ -40,12 +40,22 @@ local DEFAULTS = {
     ESPWhitelist = {},
     ESPBlacklist = {},
 
-    ESP_NAME_FORMAT = "Vertical",   -- "Horizontal" | "Vertical"
-    ESP_NAME_WIDTH  = 150,          -- nametag label width (px)
+    ESP_NAME_FORMAT = "Vertical",
+    ESP_NAME_WIDTH  = 150,
 
     -- Billboard anchoring
-    ESP_ANCHOR_PART  = "HumanoidRootPart",   -- "HumanoidRootPart"|"Head"|"UpperTorso"|"Torso"|"LowerTorso"
+    ESP_ANCHOR_PART  = "HumanoidRootPart",
     ESP_STUDS_OFFSET = Vector3.new(0, 2, 0),
+
+    -- Nametag positioning (inside the BillboardGui)
+    NT_OFFSET_X     = 0,   -- px, positive = right
+    NT_OFFSET_Y     = 0,   -- px, positive = down
+    NT_LINE_SPACING = 0,   -- px between NameLabel and SubLabel in Vertical mode
+                           -- negative = compress, positive = expand
+
+    -- If the healthbar shows its own number, drop HP from the nametag sub-line
+    -- so the Vertical nametag becomes just the distance.
+    NT_HIDE_HP_IF_BAR_TEXT = true,
 
     INTEGRATION_ENABLED = true,
     SIGHT_THRESHOLD     = 0.1,
@@ -80,7 +90,7 @@ local DEFAULTS = {
     HB_GAP               = 4,
 
     HB_BG_COLOR          = Color3.fromRGB(20, 20, 20),
-    HB_FILL_COLOR        = nil,
+    HB_FILL_COLOR        = nil,   -- fallback solid when team color is off
 
     HB_ROUNDED           = true,
     HB_CORNER_RADIUS     = 3,
@@ -89,6 +99,20 @@ local DEFAULTS = {
     HB_BORDER_COLOR      = Color3.fromRGB(0, 0, 0),
     HB_BORDER_THICKNESS  = 1,
 
+    -- Healthbar color sources
+    HB_USE_TEAM_COLOR_FILL = false,   -- fill follows player's TeamColor
+    HB_USE_TEAM_COLOR_TEXT = false,   -- number text follows player's TeamColor
+
+    -- Low-HP override (fires regardless of team color settings)
+    HB_LOWHP_OVERRIDE_ENABLED = true,
+    HB_LOWHP_THRESHOLD        = 0.33,   -- below this fraction, swap to critical gradient
+
+    HB_LOWHP_FILL_TOP    = Color3.fromRGB(255, 0, 0),      -- at threshold
+    HB_LOWHP_FILL_BOTTOM = Color3.fromRGB(0, 0, 0),        -- at 0%
+    HB_LOWHP_TEXT_TOP    = Color3.fromRGB(255, 120, 120),
+    HB_LOWHP_TEXT_BOTTOM = Color3.fromRGB(180, 0, 0),
+
+    -- Healthbar dynamic opacity
     HB_ALPHA_BASE  = 0.3,
     HB_ALPHA_SIGHT = 0.15,
     HB_ALPHA_LOOK  = 0.0,
@@ -138,6 +162,30 @@ local function getTeamColor(player)
     return brick.Color
 end
 
+-- Resolve a fill or text color given HP pct, team color, and config flags.
+-- Handles: low-HP override (always) → team color (if enabled) → fallback.
+local function resolveHealthColor(pct, teamColor, cfg, mode)
+    -- Low-HP override fires regardless of team color setting
+    if cfg.HB_LOWHP_OVERRIDE_ENABLED and pct < cfg.HB_LOWHP_THRESHOLD then
+        local t = pct / math.max(cfg.HB_LOWHP_THRESHOLD, 1e-3)   -- 1 at threshold, 0 at 0%
+        if mode == "fill" then
+            return cfg.HB_LOWHP_FILL_BOTTOM:Lerp(cfg.HB_LOWHP_FILL_TOP, t)
+        else
+            return cfg.HB_LOWHP_TEXT_BOTTOM:Lerp(cfg.HB_LOWHP_TEXT_TOP, t)
+        end
+    end
+
+    -- Above threshold → team color if enabled and available
+    if mode == "fill" then
+        if cfg.HB_USE_TEAM_COLOR_FILL and teamColor then return teamColor end
+        if cfg.HB_FILL_COLOR then return cfg.HB_FILL_COLOR end
+        return Color3.fromRGB(255 * (1 - pct), 255 * pct, 0)
+    else
+        if cfg.HB_USE_TEAM_COLOR_TEXT and teamColor then return teamColor end
+        return cfg.HB_NUMBER_COLOR
+    end
+end
+
 --------------------------------------------------------------------------------
 -- MODULE
 --------------------------------------------------------------------------------
@@ -167,10 +215,6 @@ end
 function ESP:_track(conn)
     self._connections[#self._connections + 1] = conn
     return conn
-end
-
-function ESP:_typing()
-    return UserInputService:GetFocusedTextBox() ~= nil
 end
 
 function ESP:_getHealth(character)
@@ -293,10 +337,14 @@ end
 function ESP:_computeLayout(scale)
     local cfg = self.config
     local ntSize = self._activeNtSize or cfg.NT_SIZE_BASE
+    local isVertical = (cfg.ESP_NAME_FORMAT == "Vertical")
 
     local nameH = ntSize + 6
-    local subH  = (cfg.ESP_NAME_FORMAT == "Vertical") and (ntSize + 4) or 0
-    local textH = nameH + subH
+    local subH  = isVertical and (ntSize + 4) or 0
+    -- Line spacing adjusts the *total* text block height. Negative compresses,
+    -- positive expands the gap between NameLabel and SubLabel.
+    local lineSpacing = isVertical and (cfg.NT_LINE_SPACING or 0) or 0
+    local textH = nameH + subH + lineSpacing
     local textW = cfg.ESP_NAME_WIDTH
 
     local hb = {
@@ -318,7 +366,7 @@ function ESP:_computeLayout(scale)
         bbH = math.max(textH, hb.len)
     end
 
-    return bbW, bbH, textW, textH, nameH, subH, hb
+    return bbW, bbH, textW, textH, nameH, subH, hb, lineSpacing
 end
 
 function ESP:_createESP(player)
@@ -455,7 +503,7 @@ function ESP:_centerFactor(worldPos)
     return (dot - cosFalloff) / (1 - cosFalloff)
 end
 
-function ESP:_layout(obj, bbW, bbH, textW, textH, nameH, subH, hb, scale)
+function ESP:_layout(obj, bbW, bbH, textW, textH, nameH, subH, hb, lineSpacing, scale)
     local cfg = self.config
 
     obj.Billboard.Size = UDim2.fromOffset(bbW, bbH)
@@ -496,13 +544,21 @@ function ESP:_layout(obj, bbW, bbH, textW, textH, nameH, subH, hb, scale)
         hbH = hb.len
     end
 
+    -- Apply nametag offsets. Both labels shift together; the healthbar stays put.
+    textX = textX + (cfg.NT_OFFSET_X or 0)
+    textY = textY + (cfg.NT_OFFSET_Y or 0)
+
     local finalNtSize = self._activeNtSize or cfg.NT_SIZE_BASE
 
     obj.NameLabel.Position = UDim2.fromOffset(textX, textY)
     obj.NameLabel.Size     = UDim2.new(0, textW, 0, nameH)
     obj.NameLabel.TextSize = finalNtSize
 
-    obj.SubLabel.Position = UDim2.fromOffset(textX, textY + nameH)
+    -- SubLabel Y includes the line spacing adjustment (which may be negative)
+    obj.SubLabel.Position = UDim2.fromOffset(
+        textX,
+        textY + nameH + (lineSpacing or 0)
+    )
     obj.SubLabel.Size     = UDim2.new(0, textW, 0, subH)
     obj.SubLabel.TextSize = finalNtSize
     obj.SubLabel.Visible  = (cfg.ESP_NAME_FORMAT == "Vertical")
@@ -527,7 +583,7 @@ function ESP:_layout(obj, bbW, bbH, textW, textH, nameH, subH, hb, scale)
     end
 end
 
-function ESP:_updateHealthbar(obj, hp, maxHp, scale, hbAlpha)
+function ESP:_updateHealthbar(obj, hp, maxHp, scale, hbAlpha, teamColor)
     local cfg = self.config
     if not cfg.HB_ENABLED then return end
 
@@ -544,15 +600,8 @@ function ESP:_updateHealthbar(obj, hp, maxHp, scale, hbAlpha)
         obj.HB_Fill.Position    = UDim2.fromScale(0, 1)
     end
 
-    if cfg.HB_FILL_COLOR then
-        obj.HB_Fill.BackgroundColor3 = cfg.HB_FILL_COLOR
-    else
-        obj.HB_Fill.BackgroundColor3 = Color3.fromRGB(
-            255 * (1 - pct),
-            255 * pct,
-            0
-        )
-    end
+    -- Fill color: low-HP override → team color → configured → green→red
+    obj.HB_Fill.BackgroundColor3 = resolveHealthColor(pct, teamColor, cfg, "fill")
 
     if hbAlpha ~= nil then
         obj.HB_Fill.BackgroundTransparency = hbAlpha
@@ -572,6 +621,9 @@ function ESP:_updateHealthbar(obj, hp, maxHp, scale, hbAlpha)
         else
             obj.HB_Number.TextTransparency = cfg.HB_NUMBER_ALPHA
         end
+
+        -- Text color: low-HP override → team color → configured white
+        obj.HB_Number.TextColor3 = resolveHealthColor(pct, teamColor, cfg, "text")
 
         if cfg.HB_NUMBER_SHOW_MAX then
             obj.HB_Number.Text = string.format("%d/%d", math.floor(hp), math.floor(maxHp))
@@ -634,6 +686,10 @@ function ESP:update()
     local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
     if not myRoot then return end
 
+    -- Precompute the show-HP-in-nametag decision once per frame.
+    local barShowsNumber = cfg.HB_ENABLED and cfg.HB_SHOW_NUMBER
+    local showHpInNametag = not (cfg.NT_HIDE_HP_IF_BAR_TEXT and barShowsNumber)
+
     for _, player in ipairs(Players:GetPlayers()) do
         if player ~= LocalPlayer then
             local char = player.Character
@@ -691,14 +747,15 @@ function ESP:update()
                 local maxHp = self:_getMaxHealth(char)
 
                 local nameColor = self:_getNameColor(player)
+                local teamColor = getTeamColor(player)
                 local hpColor   = healthColor(hp)
                 local distColor = distanceColor(dist)
 
                 local scale = self:_computeScreenScale(char, root)
 
-                local bbW, bbH, textW, textH, nameH, subH, hb =
+                local bbW, bbH, textW, textH, nameH, subH, hb, lineSpacing =
                     self:_computeLayout(scale)
-                self:_layout(obj, bbW, bbH, textW, textH, nameH, subH, hb, scale)
+                self:_layout(obj, bbW, bbH, textW, textH, nameH, subH, hb, lineSpacing, scale)
 
                 if self._espVisible and withinRange then
                     obj.Highlight.Adornee          = char
@@ -712,7 +769,6 @@ function ESP:update()
                 end
 
                 if self._textVisible and cfg.ESPShowText then
-                    -- Anchor the billboard on the configured body part
                     local anchorPart = char:FindFirstChild(cfg.ESP_ANCHOR_PART)
                         or root
                     obj.Billboard.Parent  = anchorPart
@@ -728,11 +784,21 @@ function ESP:update()
 
                     if cfg.ESP_NAME_FORMAT == "Vertical" then
                         obj.NameLabel.Text = player.DisplayName
-                        obj.SubLabel.Text  = string.format(
-                            '<font color="%s">%d</font> | <font color="%s">%d</font>',
-                            rgb(hpColor), hp, rgb(distColor), dist
-                        )
+
+                        if showHpInNametag then
+                            obj.SubLabel.Text = string.format(
+                                '<font color="%s">%d</font> | <font color="%s">%d</font>',
+                                rgb(hpColor), hp, rgb(distColor), dist
+                            )
+                        else
+                            obj.SubLabel.Text = string.format(
+                                '<font color="%s">%d</font>',
+                                rgb(distColor), dist
+                            )
+                        end
                     else
+                        -- Horizontal mode is unaffected by the bar-text rule;
+                        -- it always shows all three values inline.
                         obj.NameLabel.Text = string.format(
                             '<font color="%s">%s</font> | <font color="%s">%d</font> | <font color="%s">%d</font>',
                             rgb(nameColor), player.DisplayName,
@@ -742,7 +808,7 @@ function ESP:update()
                         obj.SubLabel.Text = ""
                     end
 
-                    self:_updateHealthbar(obj, hp, maxHp, scale, hbAlpha)
+                    self:_updateHealthbar(obj, hp, maxHp, scale, hbAlpha, teamColor)
                 else
                     obj.Billboard.Parent = nil
                 end
