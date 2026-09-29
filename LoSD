@@ -1,7 +1,16 @@
 --[[
     ViewLines + SEI — merged module
+
     Player line-of-sight + look-direction visualizer with off-screen
     edge arrows for viewers who can see you but are outside your viewport.
+
+    Publishes per-player state to getgenv().ModuleBus.ViewLines so other
+    modules (ESP, healthbar) can react to sight/look detection.
+
+    Bus payload (read from getgenv().ModuleBus.ViewLines):
+        Hit[player]         = true when the look beam is hitting you
+        Visibility[player]  = 0..1 sight-beam visibility fraction
+        Active              = true once :start() has run
 
     Usage:
         local ViewLines = loadstring(game:HttpGet(URL))()
@@ -10,30 +19,12 @@
         -- ...
         v:stop()
 
-    Or drive it from your own loop:
-        local v = ViewLines.new()
-        yourHeartbeat:Connect(function() v:update() end)
-
     F10 kills by default; pass KILL_KEYBIND = nil to disable.
 
     Edge indicator modes:
         "Aimed"   — arrow only when the viewer's look beam hits you
         "Visible" — arrow when the viewer has any visibility fraction > 0
         "Always"  — arrow for any hostile that's off-screen/behind
-
-    Arrow appearance:
-        Blue (EDGE_ARROW_COLOR)       — viewer sees you but isn't aiming
-        Red  (EDGE_ARROW_ALERT_COLOR) — viewer is actively aiming at you
-
-    Nametag appearance:
-        Team color (player.TeamColor), white fallback if no team
-        Transparency 0.9 → 0.0 when viewer is aiming at you
-        Size 14 → 22 when viewer is aiming at you
-
-    Sight beam appearance:
-        Color + width driven by visibility fraction (grey → red gradient)
-        Transparency toggles 0.9 → 0.0 on the same `hit` signal as the
-        nametag. Suppressed entirely by HIDE_SIGHT_WHEN_AIMED = true.
 ]]
 
 local Players          = game:GetService("Players")
@@ -59,18 +50,17 @@ local DEFAULTS = {
     -- Sight beam (viewer head → my root)
     VISIBLE_COLOR        = Color3.fromRGB(255, 45, 45),
     BLOCKED_COLOR        = Color3.fromRGB(80, 80, 80),
-    VISIBLE_TRANSPARENCY = 0.15,
-    BLOCKED_TRANSPARENCY = 0.9,
+    VISIBLE_TRANSPARENCY = 0.15,   -- legacy: unused by sight beam now
+    BLOCKED_TRANSPARENCY = 0.9,    -- legacy: unused by sight beam now
     VISIBLE_WIDTH        = 0.15,
     BLOCKED_WIDTH        = 0.05,
     HIDE_SIGHT_WHEN_AIMED = true,
 
-    -- Sight beam transparency: two-state toggle mirroring the nametag.
-    -- UNVIEWED = baseline, VIEWED = when the viewer's look beam hits you.
-    -- These override VISIBLE_TRANSPARENCY / BLOCKED_TRANSPARENCY when the
-    -- beam is rendered; the visibility fraction still drives color + width.
-    SIGHT_ALPHA_UNVIEWED = 0.9,
-    SIGHT_ALPHA_VIEWED   = 0.0,
+    -- Sight beam transparency now lerps with visibility fraction:
+    --   vis = 0   → SIGHT_ALPHA_UNVIEWED
+    --   vis = 1   → SIGHT_ALPHA_VIEWED
+    SIGHT_ALPHA_UNVIEWED = 0.75,
+    SIGHT_ALPHA_VIEWED   = 0.05,
 
     -- Look beam (face → forward along Head.LookVector)
     LOOK_COLOR              = Color3.fromRGB(60, 140, 255),
@@ -105,15 +95,15 @@ local DEFAULTS = {
     EDGE_ARROW_ALERT_COLOR = Color3.fromRGB(255, 40, 40),    -- actively aiming
     EDGE_ARROW_ALPHA       = 0.15,
 
-    -- Nametag: team-colored, transparency + size track the `viewing` state
+    -- Nametag
     EDGE_SHOW_NAME         = true,
     EDGE_NAME_SIZE         = 14,
-    EDGE_NAME_SIZE_VIEWED  = 22,     -- boost when viewer is aiming at us
+    EDGE_NAME_SIZE_VIEWED  = 22,     -- boost when viewer is actively aiming
     EDGE_NAME_COLOR        = Color3.fromRGB(255, 255, 255),  -- fallback only
     EDGE_NAME_ALPHA        = 0.9,    -- baseline (not being viewed)
-    EDGE_NAME_ALPHA_VIEWED = 0.0,    -- fully visible when viewer is aiming at us
+    EDGE_NAME_ALPHA_VIEWED = 0.0,    -- fully visible when seen/aimed at
     -- Visibility fraction at which the nametag flips to NAME_ALPHA_VIEWED.
-    -- 0.0 = any visibility counts. 0.5 = needs half the body exposed.
+    -- Size boost is separate and only follows the look beam.
     EDGE_NAME_SIGHT_THRESHOLD = 0.1,
 }
 
@@ -124,7 +114,6 @@ local function teamColorOf(player)
     if player.Team and player.TeamColor then
         return player.TeamColor.Color
     end
-    -- No team assigned → neutral white so the tag is still readable
     return Color3.fromRGB(235, 235, 235)
 end
 
@@ -187,7 +176,7 @@ function ScreenEdgeIndicators:_buildArrow(cfg)
     arrow.Name                   = "Arrow"
     arrow.Size                   = UDim2.fromScale(1, 1)
     arrow.BackgroundTransparency = 1
-    arrow.Image                  = "rbxassetid://105578389638723"
+    arrow.Image                  = "rbxassetid://5052874450"
     arrow.ImageColor3            = cfg.Color or self.config.ARROW_COLOR
     arrow.ImageTransparency      = cfg.Alpha or self.config.ARROW_ALPHA
     arrow.Rotation               = 0
@@ -215,12 +204,15 @@ end
 function ScreenEdgeIndicators:_destroyTarget(player)
     local entry = self._targets[player]
     if not entry then return end
-    if entry.frame then entry.frame:Destroy() end
+    if entry.frame then
+        pcall(function() entry.frame:Destroy() end)
+    end
     self._targets[player] = nil
 end
 
--- addTarget: creates a target on first call; refreshes dynamic fields on
--- subsequent calls (ViewLines calls this every frame while the target qualifies).
+-- addTarget: creates on first call, refreshes dynamic fields thereafter.
+-- `Viewing` = opacity (look beam OR sight threshold)
+-- `Aiming`  = size boost (look beam only)
 function ScreenEdgeIndicators:addTarget(player, opts)
     if player == LocalPlayer then return end
     opts = opts or {}
@@ -281,10 +273,8 @@ function ScreenEdgeIndicators:update()
             entry.frame.Visible = false
         else
             local screenPos, onScreen = cam:WorldToViewportPoint(anchor.Position)
-
             local camSpace = cam.CFrame:PointToObjectSpace(anchor.Position)
             local behind   = camSpace.Z >= 0
-
             local isOffscreen = (not onScreen) or behind
 
             local clampedX = math.clamp(screenPos.X, pad, viewport.X - pad)
@@ -318,23 +308,19 @@ function ScreenEdgeIndicators:update()
                 local angle = math.deg(math.atan2(dir2D.X, dir2D.Y))
                 entry.arrow.Rotation = angle
 
-                -- Arrow appearance: color toggles between
-                -- "just visible" and "actively aiming"; alpha constant.
                 entry.arrow.ImageColor3       = entry.color
                 entry.arrow.ImageTransparency = entry.alpha
 
-                -- Nametag: team color, transparency + size track `viewing`.
                 if entry.label then
                     entry.label.Text = player.DisplayName or player.Name
                     entry.label.TextColor3 = entry.nameColor
 
-                    -- Opacity: flips when the viewer can see us at all
-                    -- (look beam OR sight beam above threshold).
+                    -- Opacity: flips when the viewer can see us at all.
                     entry.label.TextTransparency = entry.viewing
                         and self.config.NAME_ALPHA_VIEWED
                         or  self.config.NAME_ALPHA
 
-                    -- Size: only boosted when they're actively aiming at us.
+                    -- Size: boosted only when actively aiming.
                     local nameSize = entry.aiming
                         and self.config.NAME_SIZE_VIEWED
                         or  self.config.NAME_SIZE
@@ -356,7 +342,7 @@ function ScreenEdgeIndicators:stop()
     self._connections = {}
     self:clearTargets()
     if self._gui then
-        self._gui:Destroy()
+        pcall(function() self._gui:Destroy() end)
         self._gui = nil
     end
     self._running = false
@@ -456,46 +442,62 @@ function ViewLines:_getSamplePoints(char)
     return pts
 end
 
+-- Bus publishing: exposes per-player state for other modules.
+function ViewLines:_publishToBus(player, hit, vis)
+    local bus = getgenv().ModuleBus
+    if not bus or not bus.ViewLines then return end
+    if not bus.ViewLines.Hit then bus.ViewLines.Hit = {} end
+    if not bus.ViewLines.Visibility then bus.ViewLines.Visibility = {} end
+    bus.ViewLines.Hit[player]        = hit
+    bus.ViewLines.Visibility[player] = vis
+end
+
+function ViewLines:_publishClear(player)
+    local bus = getgenv().ModuleBus
+    if not bus or not bus.ViewLines then return end
+    if bus.ViewLines.Hit then
+        bus.ViewLines.Hit[player] = nil
+    end
+    if bus.ViewLines.Visibility then
+        bus.ViewLines.Visibility[player] = nil
+    end
+end
+
+function ViewLines:_publishClearAll()
+    local bus = getgenv().ModuleBus
+    if not bus or not bus.ViewLines then return end
+    bus.ViewLines.Hit = {}
+    bus.ViewLines.Visibility = {}
+end
+
+-- Defensive cleanup: visuals destroyed first so a bus/SEI error can't
+-- leave orphaned dots or beams.
 function ViewLines:_cleanup(player)
     local e = self._entries[player]
     if not e then return end
+
     for _, obj in ipairs({
         e.sightBeam, e.sightAttViewer, e.sightAttMine,
         e.lookBeam,  e.lookAttFace,    e.lookAttTip,
         e.dotPart,
     }) do
-        if obj then obj:Destroy() end
+        if obj then
+            pcall(function() obj:Destroy() end)
+        end
     end
-    self._entries[player] = nil
-    self._edgeIndicators:removeTarget(player)
-end
 
-function ViewLines:_publishToBus(player, hit, vis)
-    local bus = getgenv().ModuleBus
-    if not bus or not bus.ViewLines then return end
-    bus.ViewLines.Hit[player]        = hit
-    bus.ViewLines.Visibility[player] = vis
-end
-
--- And clean up on removal:
-function ViewLines:_cleanup(player)
-    local e = self._entries[player]
-    if not e then return end
-    -- ... existing destroy code ...
-    local bus = getgenv().ModuleBus
-    if bus and bus.ViewLines then
-        bus.ViewLines.Hit[player]        = nil
-        bus.ViewLines.Visibility[player] = nil
-    end
     self._entries[player] = nil
-    self._edgeIndicators:removeTarget(player)
+
+    pcall(function() self:_publishClear(player) end)
+    pcall(function() self._edgeIndicators:removeTarget(player) end)
 end
 
 function ViewLines:_cleanupAll()
     local list = {}
     for p in pairs(self._entries) do list[#list + 1] = p end
     for _, p in ipairs(list) do self:_cleanup(p) end
-    self._edgeIndicators:clearTargets()
+    pcall(function() self._edgeIndicators:clearTargets() end)
+    pcall(function() self:_publishClearAll() end)
 end
 
 function ViewLines:_ensureEntry(player, myRoot)
@@ -530,7 +532,7 @@ function ViewLines:_ensureEntry(player, myRoot)
     sight.Width0         = cfg.BLOCKED_WIDTH
     sight.Width1         = cfg.BLOCKED_WIDTH
     sight.Color          = ColorSequence.new(cfg.BLOCKED_COLOR)
-    sight.Transparency   = NumberSequence.new(cfg.BLOCKED_TRANSPARENCY)
+    sight.Transparency   = NumberSequence.new(cfg.SIGHT_ALPHA_UNVIEWED)
     sight.Parent         = workspace
 
     -- --- Look beam (attachments in head-local space) ---
@@ -652,7 +654,7 @@ function ViewLines:_updateLookGeometry(entry, viewerHead, viewerChar)
     local endWorld = eye + look * length
     entry.lookAttTip.Position = viewerHead.CFrame:PointToObjectSpace(endWorld)
 
-    if entry.dotPart then
+    if entry.dotPart and entry.dotPart.Parent then
         entry.dotPart.CFrame = CFrame.new(endWorld)
     end
 
@@ -662,11 +664,11 @@ end
 --------------------------------------------------------------------------------
 -- APPEARANCE
 --------------------------------------------------------------------------------
-function ViewLines:_applySightAppearance(beam, vis, viewing)
+-- Sight beam: color, width, and transparency all driven by visibility
+-- fraction, so a viewer who sees more of you produces a more prominent beam.
+function ViewLines:_applySightAppearance(beam, vis)
     local cfg = self.config
 
-    -- Color + width + transparency all driven by the visibility fraction,
-    -- so a viewer who can see more of you produces a more prominent beam.
     local color, width, transparency
 
     if vis <= 0 then
@@ -706,7 +708,7 @@ function ViewLines:_applyLookAppearance(entry, hit, length)
         NumberSequenceKeypoint.new(1, tipT),
     })
 
-    if entry.dotPart then
+    if entry.dotPart and entry.dotPart.Parent then
         entry.dotPart.Color = color
     end
 end
@@ -722,14 +724,13 @@ function ViewLines:_updateEdgeIndicator(player, theirChar, hit, vis)
         return
     end
 
-    -- Mode gate
     local mode = cfg.EDGE_INDICATOR_MODE
     local qualifies
     if mode == "Aimed" then
         qualifies = hit
     elseif mode == "Visible" then
         qualifies = vis > 0.001
-    else -- "Always"
+    else
         qualifies = true
     end
 
@@ -738,7 +739,6 @@ function ViewLines:_updateEdgeIndicator(player, theirChar, hit, vis)
         return
     end
 
-    -- Is the viewer off-screen / behind us?
     local cam = workspace.CurrentCamera
     if not cam then return end
 
@@ -754,17 +754,16 @@ function ViewLines:_updateEdgeIndicator(player, theirChar, hit, vis)
     local behind       = camSpace.Z >= 0
 
     if (not onScreen) or behind then
-        -- Name opacity flips on EITHER signal: look beam hit, OR the
-        -- sight beam shows they can see enough of us. Size boost only
-        -- follows the look beam (active aiming).
+        -- Opacity flips on EITHER signal: look beam hit, OR sight beam
+        -- shows enough of us. Size boost only follows the look beam.
         local sightSeen = vis >= cfg.EDGE_NAME_SIGHT_THRESHOLD
 
         self._edgeIndicators:addTarget(player, {
             Color     = hit and cfg.EDGE_ARROW_ALERT_COLOR or cfg.EDGE_ARROW_COLOR,
             Alpha     = cfg.EDGE_ARROW_ALPHA,
             NameColor = teamColorOf(player),
-            Viewing   = hit or sightSeen,   -- opacity
-            Aiming    = hit,                -- size boost
+            Viewing   = hit or sightSeen,
+            Aiming    = hit,
         })
     else
         self._edgeIndicators:removeTarget(player)
@@ -781,7 +780,7 @@ function ViewLines:update()
     local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
     if not myChar or not myRoot then
         self:_cleanupAll()
-        self._edgeIndicators:update()
+        pcall(function() self._edgeIndicators:update() end)
         return
     end
 
@@ -831,24 +830,24 @@ function ViewLines:update()
                             )
                             self:_applyLookAppearance(e, hit, length)
 
-                            -- Visibility fraction (always computed, used by
-                            -- both the sight beam and the edge indicator).
+                            -- Visibility fraction
                             local vis = self:_evaluateVisibility(
                                 theirChar, head, myChar, mySamples
                             )
+
+                            -- Publish to bus for other modules
                             self:_publishToBus(player, hit, vis)
 
-                            -- Sight beam: hide it when the look beam already
-                            -- says "I'm being aimed at".
+                            -- Sight beam: hide it when the look beam
+                            -- already says "I'm being aimed at".
                             if cfg.HIDE_SIGHT_WHEN_AIMED and hit then
                                 e.sightBeam.Enabled = false
                             else
                                 e.sightBeam.Enabled = true
-                                self:_applySightAppearance(e.sightBeam, vis, hit)
+                                self:_applySightAppearance(e.sightBeam, vis)
                             end
 
-                            -- Off-screen arrow for viewers who can see us
-                            -- but are outside our viewport.
+                            -- Off-screen arrow
                             self:_updateEdgeIndicator(player, theirChar, hit, vis)
                         end
                     end
@@ -857,8 +856,7 @@ function ViewLines:update()
         end
     end
 
-    -- Drive SEI from our own loop (single update tick for everything).
-    self._edgeIndicators:update()
+    pcall(function() self._edgeIndicators:update() end)
 end
 
 --------------------------------------------------------------------------------
@@ -896,13 +894,12 @@ function ViewLines:start()
 end
 
 function ViewLines:stop()
-    -- Unconditional: safe even if :start() was never called.
     for _, c in ipairs(self._connections) do
         pcall(function() c:Disconnect() end)
     end
     self._connections = {}
     self:_cleanupAll()
-    self._edgeIndicators:stop()
+    pcall(function() self._edgeIndicators:stop() end)
     self._running = false
 end
 
@@ -916,7 +913,6 @@ function ViewLines:setConfig(partial)
         self.config[k] = v
     end
 
-    -- Mirror EDGE_* updates into the SEI sub-config.
     local cfg = self.config
     local sei = self._edgeIndicators
     if sei then
