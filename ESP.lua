@@ -7,7 +7,8 @@
       • Nametag size         (base → sight → look)
       • Nametag bolding      (look beam only)
       • Camera-center override opacity
-      • Healthbar fill, optional number tacked on
+      • Healthbar fill, background, and number opacity (mirrors nametag)
+      • Screen-size scaling of every element
 
     Usage:
         local ESP = loadstring(game:HttpGet(URL))()
@@ -27,7 +28,7 @@ local Camera      = workspace.CurrentCamera
 -- DEFAULTS
 --------------------------------------------------------------------------------
 local DEFAULTS = {
-    -- Existing ESP
+    -- Core toggles
     ESPEnabled          = true,
     ESPShowText         = true,
     ESPTextSize         = 13,
@@ -40,22 +41,23 @@ local DEFAULTS = {
     ESPBlacklist = {},
 
     -- Nametag format
-    ESP_NAME_FORMAT = "Horizontal",   -- "Horizontal" | "Vertical"
+    ESP_NAME_FORMAT = "Vertical",   -- "Horizontal" | "Vertical"
 
     -- ViewLines integration
     INTEGRATION_ENABLED = true,
+    SIGHT_THRESHOLD     = 0.1,
 
     -- Highlight fill transparency by state
     HL_BASE_TRANSPARENCY  = 0.7,
     HL_SIGHT_TRANSPARENCY = 0.4,
     HL_LOOK_TRANSPARENCY  = 0.1,
 
-    -- Nametag opacity
+    -- Nametag opacity by state
     NT_ALPHA_BASE  = 0.6,
     NT_ALPHA_SIGHT = 0.3,
     NT_ALPHA_LOOK  = 0.0,
 
-    -- Nametag size
+    -- Nametag size by state
     NT_SIZE_BASE  = 13,
     NT_SIZE_SIGHT = 16,
     NT_SIZE_LOOK  = 20,
@@ -63,40 +65,61 @@ local DEFAULTS = {
     -- Bold on look
     NT_BOLD_ON_LOOK = true,
 
-    -- Camera-center proximity
+    -- Camera-center override (applies to nametag AND healthbar)
     CENTER_OVERRIDE_ENABLED = true,
     CENTER_FALLOFF_DEGREES  = 45,
     CENTER_MAX_ALPHA        = 0.0,
 
-    -- Sight beam threshold for "detected"
-    SIGHT_THRESHOLD = 0.1,
+    -- Screen-size scaling
+    SCALE_ENABLED          = true,
+    SCALE_REFERENCE_HEIGHT = 140,
+    SCALE_MIN              = 0.5,
+    SCALE_MAX              = 2.0,
 
-    -- Healthbar
-    HB_ENABLED          = true,
-    HB_POSITION         = "Bottom",   -- "Top" | "Bottom" | "Left" | "Right"
-    HB_LENGTH           = 120,        -- pixels along the long axis
-    HB_THICKNESS        = 6,          -- pixels along the short axis
-    HB_GAP              = 4,          -- pixels between nametag and bar
-    HB_BG_COLOR         = Color3.fromRGB(20, 20, 20),
-    HB_BG_TRANSPARENCY  = 0.2,
-    HB_FILL_COLOR       = nil,        -- nil = auto health gradient (green→red)
+    -- Healthbar geometry
+    HB_ENABLED           = true,
+    HB_POSITION          = "Bottom",   -- "Top" | "Bottom" | "Left" | "Right"
+    HB_LENGTH            = 90,
+    HB_THICKNESS         = 5,
+    HB_GAP               = 4,
+
+    HB_BG_COLOR          = Color3.fromRGB(20, 20, 20),
+    HB_FILL_COLOR        = nil,        -- nil = auto health gradient (green→red)
+
+    HB_ROUNDED           = true,
+    HB_CORNER_RADIUS     = 3,
+
+    HB_BORDER            = true,
+    HB_BORDER_COLOR      = Color3.fromRGB(0, 0, 0),
+    HB_BORDER_THICKNESS  = 1,
+
+    -- Healthbar DYNAMIC opacity — mirrors the nametag pipeline:
+    -- (state-driven base → center override min).
+    HB_ALPHA_BASE  = 0.3,    -- not being seen
+    HB_ALPHA_SIGHT = 0.15,   -- sight beam detects
+    HB_ALPHA_LOOK  = 0.0,    -- look beam hits
+
+    -- Extra transparency layered on top of the resolved hbAlpha.
+    -- Background is usually a touch more transparent than the fill so
+    -- the fill reads clearly even at full opacity.
+    HB_BG_EXTRA_TRANSPARENCY     = 0.15,
+    HB_NUMBER_EXTRA_TRANSPARENCY = 0.0,
+
+    -- Static fallback transparency values, used ONLY when
+    -- INTEGRATION_ENABLED = false.
+    HB_BG_TRANSPARENCY   = 0.2,
     HB_FILL_TRANSPARENCY = 0.0,
-    HB_ROUNDED          = true,
-    HB_CORNER_RADIUS    = 3,
-    HB_BORDER           = true,
-    HB_BORDER_COLOR     = Color3.fromRGB(0, 0, 0),
-    HB_BORDER_THICKNESS = 1,
+    HB_NUMBER_ALPHA      = 0.0,
 
     -- Healthbar number
-    HB_SHOW_NUMBER       = false,
-    HB_NUMBER_POSITION   = "Inside",  -- "Inside" | "Left" | "Right" | "Above" | "Below"
+    HB_SHOW_NUMBER       = true,
+    HB_NUMBER_POSITION   = "Inside",   -- "Inside"|"Left"|"Right"|"Above"|"Below"
     HB_NUMBER_SIZE       = 12,
     HB_NUMBER_COLOR      = Color3.fromRGB(255, 255, 255),
-    HB_NUMBER_ALPHA      = 0.0,
-    HB_NUMBER_SHOW_MAX   = false,     -- "75" vs "75/100"
+    HB_NUMBER_SHOW_MAX   = false,
 
-    -- Kill keybind (nil = disabled, master owns it)
-    KILL_KEYBIND = nil,
+    -- Lifecycle
+    KILL_KEYBIND    = nil,
     UPDATE_INTERVAL = 0,
 }
 
@@ -149,6 +172,7 @@ function ESP.new(overrides)
     self._lastUpdate  = 0
     self._espVisible  = true
     self._textVisible = true
+    self._activeNtSize = nil
 
     return self
 end
@@ -227,22 +251,82 @@ function ESP:_getNameColor(player)
     return color
 end
 
--- Compute the BillboardGui and element layout sizes for this frame.
-function ESP:_computeLayout()
+-- Compute a scale factor from the target's projected height on screen.
+function ESP:_computeScreenScale(char, root)
+    if not self.config.SCALE_ENABLED then return 1 end
+
+    local cam = workspace.CurrentCamera
+    if not cam then return 1 end
+
+    local head = char:FindFirstChild("Head")
+    if not head then return 1 end
+
+    local headScreen = cam:WorldToViewportPoint(head.Position)
+    local feetScreen = cam:WorldToViewportPoint(
+        root.Position - Vector3.new(0, 2.5, 0)
+    )
+
+    local screenHeight = math.abs(headScreen.Y - feetScreen.Y)
+    local reference    = math.max(self.config.SCALE_REFERENCE_HEIGHT, 1)
+    local raw          = screenHeight / reference
+
+    return math.clamp(raw, self.config.SCALE_MIN, self.config.SCALE_MAX)
+end
+
+-- Resolve the dynamic alpha for both nametag and healthbar given the
+-- ViewLines state and the camera-center factor. Returns (ntAlpha, hbAlpha).
+function ESP:_resolveAlphas(hit, sightSeen, rootPos)
     local cfg = self.config
-    local ntSize = self._activeNtSize or cfg.NT_SIZE_BASE
+
+    local ntAlpha, hbAlpha
+
+    if cfg.INTEGRATION_ENABLED then
+        if hit then
+            ntAlpha = cfg.NT_ALPHA_LOOK
+            hbAlpha = cfg.HB_ALPHA_LOOK
+        elseif sightSeen then
+            ntAlpha = cfg.NT_ALPHA_SIGHT
+            hbAlpha = cfg.HB_ALPHA_SIGHT
+        else
+            ntAlpha = cfg.NT_ALPHA_BASE
+            hbAlpha = cfg.HB_ALPHA_BASE
+        end
+    else
+        ntAlpha = cfg.NT_ALPHA_BASE
+        hbAlpha = cfg.HB_FILL_TRANSPARENCY
+    end
+
+    -- Camera-center override: more opaque when the target is closer to
+    -- the crosshair. Applies to BOTH nametag and healthbar identically.
+    if cfg.CENTER_OVERRIDE_ENABLED then
+        local cf = self:_centerFactor(rootPos)
+        if cf > 0 then
+            local centerAlpha = cfg.CENTER_MAX_ALPHA
+                + (1 - cfg.CENTER_MAX_ALPHA) * (1 - cf)
+            ntAlpha = math.min(ntAlpha, centerAlpha)
+            hbAlpha = math.min(hbAlpha, centerAlpha)
+        end
+    end
+
+    return ntAlpha, hbAlpha
+end
+
+-- Compute the BillboardGui and element layout sizes for this frame.
+function ESP:_computeLayout(scale)
+    local cfg = self.config
+    local ntSize = (self._activeNtSize or cfg.NT_SIZE_BASE) * scale
 
     local nameH = ntSize + 6
     local subH  = (cfg.ESP_NAME_FORMAT == "Vertical") and (ntSize + 4) or 0
     local textH = nameH + subH
-    local textW = 220
+    local textW = 220 * scale
 
     local hb = {
         enabled = cfg.HB_ENABLED,
         pos     = cfg.HB_POSITION,
-        len     = cfg.HB_LENGTH,
-        thick   = cfg.HB_THICKNESS,
-        gap     = cfg.HB_GAP,
+        len     = cfg.HB_LENGTH * scale,
+        thick   = cfg.HB_THICKNESS * scale,
+        gap     = cfg.HB_GAP * scale,
     }
 
     local bbW, bbH
@@ -251,7 +335,7 @@ function ESP:_computeLayout()
     elseif hb.pos == "Top" or hb.pos == "Bottom" then
         bbW = math.max(textW, hb.len)
         bbH = textH + hb.thick + hb.gap
-    else -- Left or Right
+    else
         bbW = textW + hb.thick + hb.gap
         bbH = math.max(textH, hb.len)
     end
@@ -276,7 +360,6 @@ function ESP:_createESP(player)
     billboard.StudsOffset = Vector3.new(0, 3, 0)
     billboard.Size        = UDim2.fromOffset(220, 60)
 
-    -- Name label
     local nameLabel = Instance.new("TextLabel")
     nameLabel.BackgroundTransparency = 1
     nameLabel.Size                   = UDim2.new(1, 0, 0, cfg.NT_SIZE_BASE + 6)
@@ -289,7 +372,6 @@ function ESP:_createESP(player)
     nameLabel.Text                   = ""
     nameLabel.Parent                 = billboard
 
-    -- Sub label (Vertical mode only)
     local subLabel = Instance.new("TextLabel")
     subLabel.BackgroundTransparency = 1
     subLabel.Size                   = UDim2.new(1, 0, 0, cfg.NT_SIZE_BASE + 4)
@@ -305,11 +387,11 @@ function ESP:_createESP(player)
 
     -- Healthbar background
     local hbBack = Instance.new("Frame")
-    hbBack.BackgroundColor3      = cfg.HB_BG_COLOR
+    hbBack.BackgroundColor3       = cfg.HB_BG_COLOR
     hbBack.BackgroundTransparency = cfg.HB_BG_TRANSPARENCY
-    hbBack.BorderSizePixel       = 0
-    hbBack.Visible               = cfg.HB_ENABLED
-    hbBack.Parent                = billboard
+    hbBack.BorderSizePixel        = 0
+    hbBack.Visible                = cfg.HB_ENABLED
+    hbBack.Parent                 = billboard
 
     if cfg.HB_BORDER then
         local stroke = Instance.new("UIStroke")
@@ -327,11 +409,11 @@ function ESP:_createESP(player)
 
     -- Healthbar fill
     local hbFill = Instance.new("Frame")
-    hbFill.BackgroundColor3      = Color3.fromRGB(0, 255, 0)
+    hbFill.BackgroundColor3       = Color3.fromRGB(0, 255, 0)
     hbFill.BackgroundTransparency = cfg.HB_FILL_TRANSPARENCY
-    hbFill.BorderSizePixel       = 0
-    hbFill.Size                  = UDim2.fromScale(1, 1)
-    hbFill.Parent                = hbBack
+    hbFill.BorderSizePixel        = 0
+    hbFill.Size                   = UDim2.fromScale(1, 1)
+    hbFill.Parent                 = hbBack
 
     if cfg.HB_ROUNDED then
         local corner = Instance.new("UICorner")
@@ -398,10 +480,7 @@ function ESP:_centerFactor(worldPos)
     return (dot - cosFalloff) / (1 - cosFalloff)
 end
 
--- Position the nametag, sub-label, and healthbar inside the BillboardGui
--- based on the current format + healthbar position. Called every frame
--- because the layout sizes can change with the size boost.
-function ESP:_layout(obj, bbW, bbH, textW, textH, nameH, subH, hb)
+function ESP:_layout(obj, bbW, bbH, textW, textH, nameH, subH, hb, scale)
     local cfg = self.config
 
     obj.Billboard.Size = UDim2.fromOffset(bbW, bbH)
@@ -417,13 +496,11 @@ function ESP:_layout(obj, bbW, bbH, textW, textH, nameH, subH, hb)
         hbY = 0
         hbW = hb.len
         hbH = hb.thick
-
         textX = (bbW - textW) * 0.5
         textY = hb.thick + hb.gap
     elseif hb.pos == "Bottom" then
         textX = (bbW - textW) * 0.5
         textY = 0
-
         hbX = (bbW - hb.len) * 0.5
         hbY = textH + hb.gap
         hbW = hb.len
@@ -433,55 +510,65 @@ function ESP:_layout(obj, bbW, bbH, textW, textH, nameH, subH, hb)
         hbY = (bbH - hb.len) * 0.5
         hbW = hb.thick
         hbH = hb.len
-
         textX = hb.thick + hb.gap
         textY = (bbH - textH) * 0.5
     else -- Right
         textX = 0
         textY = (bbH - textH) * 0.5
-
         hbX = textW + hb.gap
         hbY = (bbH - hb.len) * 0.5
         hbW = hb.thick
         hbH = hb.len
     end
 
-    -- Nametag
+    local finalNtSize = (self._activeNtSize or cfg.NT_SIZE_BASE) * scale
+
     obj.NameLabel.Position = UDim2.fromOffset(textX, textY)
     obj.NameLabel.Size     = UDim2.new(0, textW, 0, nameH)
+    obj.NameLabel.TextSize = finalNtSize
 
-    -- Sub-label (only Vertical format)
     obj.SubLabel.Position = UDim2.fromOffset(textX, textY + nameH)
     obj.SubLabel.Size     = UDim2.new(0, textW, 0, subH)
+    obj.SubLabel.TextSize = finalNtSize
     obj.SubLabel.Visible  = (cfg.ESP_NAME_FORMAT == "Vertical")
 
-    -- Healthbar
     if hb.enabled then
-        obj.HB_Back.Visible = true
+        obj.HB_Back.Visible  = true
         obj.HB_Back.Position = UDim2.fromOffset(hbX, hbY)
         obj.HB_Back.Size     = UDim2.fromOffset(hbW, hbH)
     else
         obj.HB_Back.Visible = false
     end
+
+    if cfg.HB_ROUNDED then
+        local corner = obj.HB_Back:FindFirstChildOfClass("UICorner")
+        if corner then
+            corner.CornerRadius = UDim.new(0, cfg.HB_CORNER_RADIUS * scale)
+        end
+        local fillCorner = obj.HB_Fill:FindFirstChildOfClass("UICorner")
+        if fillCorner then
+            fillCorner.CornerRadius = UDim.new(0, cfg.HB_CORNER_RADIUS * scale)
+        end
+    end
 end
 
--- Update the fill, color, and optional number
-function ESP:_updateHealthbar(obj, hp, maxHp)
+-- Update fill size/color, opacity (dynamic), and optional number.
+function ESP:_updateHealthbar(obj, hp, maxHp, scale, hbAlpha)
     local cfg = self.config
     if not cfg.HB_ENABLED then return end
 
     local pct = math.clamp(hp / math.max(maxHp, 1), 0, 1)
     local isHorizontal = (cfg.HB_POSITION == "Top" or cfg.HB_POSITION == "Bottom")
 
-    -- Fill size
+    -- Fill size + anchor
     if isHorizontal then
-        obj.HB_Fill.Size = UDim2.fromScale(pct, 1)
+        obj.HB_Fill.Size        = UDim2.fromScale(pct, 1)
         obj.HB_Fill.AnchorPoint = Vector2.new(0, 0)
-        obj.HB_Fill.Position = UDim2.fromScale(0, 0)
+        obj.HB_Fill.Position    = UDim2.fromScale(0, 0)
     else
-        obj.HB_Fill.Size = UDim2.fromScale(1, pct)
+        obj.HB_Fill.Size        = UDim2.fromScale(1, pct)
         obj.HB_Fill.AnchorPoint = Vector2.new(0, 1)
-        obj.HB_Fill.Position = UDim2.fromScale(0, 1)
+        obj.HB_Fill.Position    = UDim2.fromScale(0, 1)
     end
 
     -- Fill color
@@ -495,7 +582,33 @@ function ESP:_updateHealthbar(obj, hp, maxHp)
         )
     end
 
-    -- Optional number
+    -- ─── Dynamic opacity ─────────────────────────────────────────────
+    -- hbAlpha already includes ViewLines state + camera-center override.
+    -- Fill uses hbAlpha directly.
+    -- Background is a bit more transparent (HB_BG_EXTRA_TRANSPARENCY).
+    -- Number matches the fill unless HB_NUMBER_EXTRA_TRANSPARENCY > 0.
+    if hbAlpha ~= nil then
+        obj.HB_Fill.BackgroundTransparency = hbAlpha
+        obj.HB_Back.BackgroundTransparency = math.clamp(
+            hbAlpha + cfg.HB_BG_EXTRA_TRANSPARENCY, 0, 1
+        )
+    else
+        -- Integration disabled → fall back to static values
+        obj.HB_Fill.BackgroundTransparency = cfg.HB_FILL_TRANSPARENCY
+        obj.HB_Back.BackgroundTransparency = cfg.HB_BG_TRANSPARENCY
+    end
+
+    if obj.HB_Number then
+        if hbAlpha ~= nil then
+            obj.HB_Number.TextTransparency = math.clamp(
+                hbAlpha + cfg.HB_NUMBER_EXTRA_TRANSPARENCY, 0, 1
+            )
+        else
+            obj.HB_Number.TextTransparency = cfg.HB_NUMBER_ALPHA
+        end
+    end
+
+    -- Optional number text + positioning
     if obj.HB_Number then
         if cfg.HB_NUMBER_SHOW_MAX then
             obj.HB_Number.Text = string.format("%d/%d", math.floor(hp), math.floor(maxHp))
@@ -503,8 +616,10 @@ function ESP:_updateHealthbar(obj, hp, maxHp)
             obj.HB_Number.Text = tostring(math.floor(hp))
         end
 
-        local numW = 80
-        local numH = cfg.HB_NUMBER_SIZE + 4
+        obj.HB_Number.TextSize = cfg.HB_NUMBER_SIZE * scale
+
+        local numW = 80 * scale
+        local numH = (cfg.HB_NUMBER_SIZE * scale) + 4
         local hbBack = obj.HB_Back
 
         if cfg.HB_NUMBER_POSITION == "Inside" then
@@ -590,31 +705,10 @@ function ESP:update()
                     fillT = cfg.HL_BASE_TRANSPARENCY
                 end
 
-                -- Nametag opacity
-                local ntAlpha
-                if cfg.INTEGRATION_ENABLED then
-                    if hit then
-                        ntAlpha = cfg.NT_ALPHA_LOOK
-                    elseif sightSeen then
-                        ntAlpha = cfg.NT_ALPHA_SIGHT
-                    else
-                        ntAlpha = cfg.NT_ALPHA_BASE
-                    end
-                else
-                    ntAlpha = cfg.NT_ALPHA_BASE
-                end
+                -- Resolve nametag + healthbar alpha through the same pipeline
+                local ntAlpha, hbAlpha = self:_resolveAlphas(hit, sightSeen, root.Position)
 
-                -- Camera-center override
-                if cfg.CENTER_OVERRIDE_ENABLED then
-                    local cf = self:_centerFactor(root.Position)
-                    if cf > 0 then
-                        local centerAlpha = cfg.CENTER_MAX_ALPHA
-                            + (1 - cfg.CENTER_MAX_ALPHA) * (1 - cf)
-                        ntAlpha = math.min(ntAlpha, centerAlpha)
-                    end
-                end
-
-                -- Nametag size
+                -- Nametag size (pre-scale; _layout applies the scale)
                 local ntSize
                 if cfg.INTEGRATION_ENABLED then
                     if hit then
@@ -643,9 +737,13 @@ function ESP:update()
                 local hpColor   = healthColor(hp)
                 local distColor = distanceColor(dist)
 
+                -- Screen-size scale
+                local scale = self:_computeScreenScale(char, root)
+
                 -- Layout
-                local bbW, bbH, textW, textH, nameH, subH, hb = self:_computeLayout()
-                self:_layout(obj, bbW, bbH, textW, textH, nameH, subH, hb)
+                local bbW, bbH, textW, textH, nameH, subH, hb =
+                    self:_computeLayout(scale)
+                self:_layout(obj, bbW, bbH, textW, textH, nameH, subH, hb, scale)
 
                 -- Apply highlight
                 if self._espVisible and withinRange then
@@ -661,15 +759,13 @@ function ESP:update()
 
                 -- Apply text
                 if self._textVisible and cfg.ESPShowText then
-                    obj.Billboard.Parent = root
+                    obj.Billboard.Parent  = root
                     obj.Billboard.Enabled = true
 
-                    obj.NameLabel.TextSize         = ntSize
                     obj.NameLabel.Font             = ntFont
                     obj.NameLabel.TextColor3       = nameColor
                     obj.NameLabel.TextTransparency = ntAlpha
 
-                    obj.SubLabel.TextSize         = ntSize
                     obj.SubLabel.Font             = ntFont
                     obj.SubLabel.TextColor3       = nameColor
                     obj.SubLabel.TextTransparency = ntAlpha
@@ -690,7 +786,7 @@ function ESP:update()
                         obj.SubLabel.Text = ""
                     end
 
-                    self:_updateHealthbar(obj, hp, maxHp)
+                    self:_updateHealthbar(obj, hp, maxHp, scale, hbAlpha)
                 else
                     obj.Billboard.Parent = nil
                 end
