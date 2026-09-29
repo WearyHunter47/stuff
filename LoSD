@@ -470,6 +470,27 @@ function ViewLines:_cleanup(player)
     self._edgeIndicators:removeTarget(player)
 end
 
+function ViewLines:_publishToBus(player, hit, vis)
+    local bus = getgenv().ModuleBus
+    if not bus or not bus.ViewLines then return end
+    bus.ViewLines.Hit[player]        = hit
+    bus.ViewLines.Visibility[player] = vis
+end
+
+-- And clean up on removal:
+function ViewLines:_cleanup(player)
+    local e = self._entries[player]
+    if not e then return end
+    -- ... existing destroy code ...
+    local bus = getgenv().ModuleBus
+    if bus and bus.ViewLines then
+        bus.ViewLines.Hit[player]        = nil
+        bus.ViewLines.Visibility[player] = nil
+    end
+    self._entries[player] = nil
+    self._edgeIndicators:removeTarget(player)
+end
+
 function ViewLines:_cleanupAll()
     local list = {}
     for p in pairs(self._entries) do list[#list + 1] = p end
@@ -815,6 +836,7 @@ function ViewLines:update()
                             local vis = self:_evaluateVisibility(
                                 theirChar, head, myChar, mySamples
                             )
+                            self:_publishToBus(player, hit, vis)
 
                             -- Sight beam: hide it when the look beam already
                             -- says "I'm being aimed at".
