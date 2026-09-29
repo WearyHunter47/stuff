@@ -827,13 +827,17 @@ function ESP:stop()
     if not self._running then return end
     self._running = false
 
-    for _, c in ipairs(self._connections) do
-        pcall(function() c:Disconnect() end)
+    for i = #self._connections, 1, -1 do
+        local c = self._connections[i]
+        self._connections[i] = nil
+        if typeof(c) == "RBXScriptConnection" then
+            c:Disconnect()
+        end
     end
     self._connections = {}
 
     for player in pairs(self._objects) do
-        self:_removeESP(player)
+        pcall(function() self:_removeESP(player) end)
     end
 end
 
