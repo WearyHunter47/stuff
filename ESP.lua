@@ -1,5 +1,5 @@
 --[[
-    ESP Module — standalone, bus-aware
+    ESP Module — standalone, bus-aware, with healthbar + format modes
 
     Reads ViewLines state from getgenv().ModuleBus.ViewLines to drive:
       • Highlight fill transparency (base → sight → look)
@@ -7,14 +7,12 @@
       • Nametag size         (base → sight → look)
       • Nametag bolding      (look beam only)
       • Camera-center override opacity
+      • Healthbar fill, optional number tacked on
 
     Usage:
         local ESP = loadstring(game:HttpGet(URL))()
         local esp = ESP.new({ ... })
         esp:start()
-
-    Or drive manually:
-        esp:update()
 ]]
 
 local Players          = game:GetService("Players")
@@ -40,6 +38,9 @@ local DEFAULTS = {
 
     ESPWhitelist = {},
     ESPBlacklist = {},
+
+    -- Nametag format
+    ESP_NAME_FORMAT = "Horizontal",   -- "Horizontal" | "Vertical"
 
     -- ViewLines integration
     INTEGRATION_ENABLED = true,
@@ -70,6 +71,31 @@ local DEFAULTS = {
     -- Sight beam threshold for "detected"
     SIGHT_THRESHOLD = 0.1,
 
+    -- Healthbar
+    HB_ENABLED          = true,
+    HB_POSITION         = "Bottom",   -- "Top" | "Bottom" | "Left" | "Right"
+    HB_LENGTH           = 120,        -- pixels along the long axis
+    HB_THICKNESS        = 6,          -- pixels along the short axis
+    HB_GAP              = 4,          -- pixels between nametag and bar
+    HB_BG_COLOR         = Color3.fromRGB(20, 20, 20),
+    HB_BG_TRANSPARENCY  = 0.2,
+    HB_FILL_COLOR       = nil,        -- nil = auto health gradient (green→red)
+    HB_FILL_TRANSPARENCY = 0.0,
+    HB_ROUNDED          = true,
+    HB_CORNER_RADIUS    = 3,
+    HB_BORDER           = true,
+    HB_BORDER_COLOR     = Color3.fromRGB(0, 0, 0),
+    HB_BORDER_THICKNESS = 1,
+
+    -- Healthbar number
+    HB_SHOW_NUMBER       = false,
+    HB_NUMBER_POSITION   = "Inside",  -- "Inside" | "Left" | "Right" | "Above" | "Below"
+    HB_NUMBER_SIZE       = 12,
+    HB_NUMBER_COLOR      = Color3.fromRGB(255, 255, 255),
+    HB_NUMBER_ALPHA      = 0.0,
+    HB_NUMBER_SHOW_MAX   = false,     -- "75" vs "75/100"
+
+    -- Kill keybind (nil = disabled, master owns it)
     KILL_KEYBIND = nil,
     UPDATE_INTERVAL = 0,
 }
@@ -116,8 +142,8 @@ function ESP.new(overrides)
         for k, v in pairs(overrides) do self.config[k] = v end
     end
 
-    self._objects     = {}   -- [Player] = { Highlight, Billboard, Label }
-    self._nameColors  = {}   -- [Player] = Color3 (cached)
+    self._objects     = {}
+    self._nameColors  = {}
     self._connections = {}
     self._running     = false
     self._lastUpdate  = 0
@@ -150,8 +176,13 @@ function ESP:_getHealth(character)
     return 0
 end
 
+function ESP:_getMaxHealth(character)
+    local hum = character:FindFirstChildOfClass("Humanoid")
+    if hum and hum.MaxHealth > 0 then return hum.MaxHealth end
+    return 100
+end
+
 function ESP:_getNameColor(player)
-    -- Cached: recompute only when whitelist/blacklist/friendship changes
     local cached = self._nameColors[player]
     if cached then return cached end
 
@@ -196,35 +227,141 @@ function ESP:_getNameColor(player)
     return color
 end
 
+-- Compute the BillboardGui and element layout sizes for this frame.
+function ESP:_computeLayout()
+    local cfg = self.config
+    local ntSize = self._activeNtSize or cfg.NT_SIZE_BASE
+
+    local nameH = ntSize + 6
+    local subH  = (cfg.ESP_NAME_FORMAT == "Vertical") and (ntSize + 4) or 0
+    local textH = nameH + subH
+    local textW = 220
+
+    local hb = {
+        enabled = cfg.HB_ENABLED,
+        pos     = cfg.HB_POSITION,
+        len     = cfg.HB_LENGTH,
+        thick   = cfg.HB_THICKNESS,
+        gap     = cfg.HB_GAP,
+    }
+
+    local bbW, bbH
+    if not hb.enabled then
+        bbW, bbH = textW, textH
+    elseif hb.pos == "Top" or hb.pos == "Bottom" then
+        bbW = math.max(textW, hb.len)
+        bbH = textH + hb.thick + hb.gap
+    else -- Left or Right
+        bbW = textW + hb.thick + hb.gap
+        bbH = math.max(textH, hb.len)
+    end
+
+    return bbW, bbH, textW, textH, nameH, subH, hb
+end
+
 function ESP:_createESP(player)
     if self._objects[player] then return self._objects[player] end
 
+    local cfg = self.config
+
     local highlight = Instance.new("Highlight")
     highlight.DepthMode          = Enum.HighlightDepthMode.AlwaysOnTop
-    highlight.FillTransparency   = self.config.HL_BASE_TRANSPARENCY
+    highlight.FillTransparency   = cfg.HL_BASE_TRANSPARENCY
     highlight.OutlineTransparency = 0
     highlight.Enabled            = true
     highlight.Parent             = CoreGui
 
     local billboard = Instance.new("BillboardGui")
-    billboard.Size        = UDim2.new(0, 220, 0, 50)
     billboard.AlwaysOnTop = true
     billboard.StudsOffset = Vector3.new(0, 3, 0)
+    billboard.Size        = UDim2.fromOffset(220, 60)
 
-    local label = Instance.new("TextLabel")
-    label.BackgroundTransparency = 1
-    label.Size                   = UDim2.new(1, 0, 1, 0)
-    label.Font                   = Enum.Font.Code
-    label.TextScaled             = false
-    label.RichText               = true
-    label.TextStrokeTransparency = 0
-    label.TextColor3             = Color3.new(1, 1, 1)
-    label.Parent                 = billboard
+    -- Name label
+    local nameLabel = Instance.new("TextLabel")
+    nameLabel.BackgroundTransparency = 1
+    nameLabel.Size                   = UDim2.new(1, 0, 0, cfg.NT_SIZE_BASE + 6)
+    nameLabel.Position               = UDim2.new(0, 0, 0, 0)
+    nameLabel.Font                   = Enum.Font.GothamMedium
+    nameLabel.TextScaled             = false
+    nameLabel.RichText               = true
+    nameLabel.TextStrokeTransparency = 0
+    nameLabel.TextColor3             = Color3.new(1, 1, 1)
+    nameLabel.Text                   = ""
+    nameLabel.Parent                 = billboard
+
+    -- Sub label (Vertical mode only)
+    local subLabel = Instance.new("TextLabel")
+    subLabel.BackgroundTransparency = 1
+    subLabel.Size                   = UDim2.new(1, 0, 0, cfg.NT_SIZE_BASE + 4)
+    subLabel.Position               = UDim2.new(0, 0, 0, cfg.NT_SIZE_BASE + 6)
+    subLabel.Font                   = Enum.Font.GothamMedium
+    subLabel.TextScaled             = false
+    subLabel.RichText               = true
+    subLabel.TextStrokeTransparency = 0
+    subLabel.TextColor3             = Color3.new(1, 1, 1)
+    subLabel.Text                   = ""
+    subLabel.Visible                = (cfg.ESP_NAME_FORMAT == "Vertical")
+    subLabel.Parent                 = billboard
+
+    -- Healthbar background
+    local hbBack = Instance.new("Frame")
+    hbBack.BackgroundColor3      = cfg.HB_BG_COLOR
+    hbBack.BackgroundTransparency = cfg.HB_BG_TRANSPARENCY
+    hbBack.BorderSizePixel       = 0
+    hbBack.Visible               = cfg.HB_ENABLED
+    hbBack.Parent                = billboard
+
+    if cfg.HB_BORDER then
+        local stroke = Instance.new("UIStroke")
+        stroke.Color        = cfg.HB_BORDER_COLOR
+        stroke.Thickness    = cfg.HB_BORDER_THICKNESS
+        stroke.Transparency = 0
+        stroke.Parent       = hbBack
+    end
+
+    if cfg.HB_ROUNDED then
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(0, cfg.HB_CORNER_RADIUS)
+        corner.Parent = hbBack
+    end
+
+    -- Healthbar fill
+    local hbFill = Instance.new("Frame")
+    hbFill.BackgroundColor3      = Color3.fromRGB(0, 255, 0)
+    hbFill.BackgroundTransparency = cfg.HB_FILL_TRANSPARENCY
+    hbFill.BorderSizePixel       = 0
+    hbFill.Size                  = UDim2.fromScale(1, 1)
+    hbFill.Parent                = hbBack
+
+    if cfg.HB_ROUNDED then
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(0, cfg.HB_CORNER_RADIUS)
+        corner.Parent = hbFill
+    end
+
+    -- Healthbar number
+    local hbNumber
+    if cfg.HB_SHOW_NUMBER then
+        hbNumber = Instance.new("TextLabel")
+        hbNumber.BackgroundTransparency = 1
+        hbNumber.Font                   = Enum.Font.GothamBold
+        hbNumber.TextScaled             = false
+        hbNumber.TextSize               = cfg.HB_NUMBER_SIZE
+        hbNumber.TextColor3             = cfg.HB_NUMBER_COLOR
+        hbNumber.TextTransparency       = cfg.HB_NUMBER_ALPHA
+        hbNumber.TextStrokeTransparency = 0
+        hbNumber.Text                   = ""
+        hbNumber.Parent                 = billboard
+    end
 
     self._objects[player] = {
         Highlight = highlight,
         Billboard = billboard,
-        Label     = label,
+        NameLabel = nameLabel,
+        SubLabel  = subLabel,
+        HB_Back   = hbBack,
+        HB_Fill   = hbFill,
+        HB_Number = hbNumber,
     }
     return self._objects[player]
 end
@@ -238,7 +375,6 @@ function ESP:_removeESP(player)
     self._nameColors[player] = nil
 end
 
--- Read ViewLines state from the shared bus
 function ESP:_getViewLinesState(player)
     local bus = getgenv().ModuleBus
     if not bus or not bus.ViewLines or not bus.ViewLines.Active then
@@ -249,7 +385,6 @@ function ESP:_getViewLinesState(player)
     return hit, vis
 end
 
--- Camera-center factor: 1 at center, 0 beyond CENTER_FALLOFF_DEGREES
 function ESP:_centerFactor(worldPos)
     local cam = workspace.CurrentCamera
     if not cam then return 0 end
@@ -257,11 +392,150 @@ function ESP:_centerFactor(worldPos)
     if toTarget.Magnitude < 1e-4 then return 0 end
     toTarget = toTarget.Unit
     local look = cam.CFrame.LookVector
-    local dot  = look:Dot(toTarget)                -- 1 = center, -1 = behind
+    local dot  = look:Dot(toTarget)
     local cosFalloff = math.cos(math.rad(self.config.CENTER_FALLOFF_DEGREES))
     if dot <= cosFalloff then return 0 end
-    -- Normalize dot from [cosFalloff, 1] to [0, 1]
     return (dot - cosFalloff) / (1 - cosFalloff)
+end
+
+-- Position the nametag, sub-label, and healthbar inside the BillboardGui
+-- based on the current format + healthbar position. Called every frame
+-- because the layout sizes can change with the size boost.
+function ESP:_layout(obj, bbW, bbH, textW, textH, nameH, subH, hb)
+    local cfg = self.config
+
+    obj.Billboard.Size = UDim2.fromOffset(bbW, bbH)
+
+    local textX, textY
+    local hbX, hbY, hbW, hbH
+
+    if not hb.enabled then
+        textX = (bbW - textW) * 0.5
+        textY = 0
+    elseif hb.pos == "Top" then
+        hbX = (bbW - hb.len) * 0.5
+        hbY = 0
+        hbW = hb.len
+        hbH = hb.thick
+
+        textX = (bbW - textW) * 0.5
+        textY = hb.thick + hb.gap
+    elseif hb.pos == "Bottom" then
+        textX = (bbW - textW) * 0.5
+        textY = 0
+
+        hbX = (bbW - hb.len) * 0.5
+        hbY = textH + hb.gap
+        hbW = hb.len
+        hbH = hb.thick
+    elseif hb.pos == "Left" then
+        hbX = 0
+        hbY = (bbH - hb.len) * 0.5
+        hbW = hb.thick
+        hbH = hb.len
+
+        textX = hb.thick + hb.gap
+        textY = (bbH - textH) * 0.5
+    else -- Right
+        textX = 0
+        textY = (bbH - textH) * 0.5
+
+        hbX = textW + hb.gap
+        hbY = (bbH - hb.len) * 0.5
+        hbW = hb.thick
+        hbH = hb.len
+    end
+
+    -- Nametag
+    obj.NameLabel.Position = UDim2.fromOffset(textX, textY)
+    obj.NameLabel.Size     = UDim2.new(0, textW, 0, nameH)
+
+    -- Sub-label (only Vertical format)
+    obj.SubLabel.Position = UDim2.fromOffset(textX, textY + nameH)
+    obj.SubLabel.Size     = UDim2.new(0, textW, 0, subH)
+    obj.SubLabel.Visible  = (cfg.ESP_NAME_FORMAT == "Vertical")
+
+    -- Healthbar
+    if hb.enabled then
+        obj.HB_Back.Visible = true
+        obj.HB_Back.Position = UDim2.fromOffset(hbX, hbY)
+        obj.HB_Back.Size     = UDim2.fromOffset(hbW, hbH)
+    else
+        obj.HB_Back.Visible = false
+    end
+end
+
+-- Update the fill, color, and optional number
+function ESP:_updateHealthbar(obj, hp, maxHp)
+    local cfg = self.config
+    if not cfg.HB_ENABLED then return end
+
+    local pct = math.clamp(hp / math.max(maxHp, 1), 0, 1)
+    local isHorizontal = (cfg.HB_POSITION == "Top" or cfg.HB_POSITION == "Bottom")
+
+    -- Fill size
+    if isHorizontal then
+        obj.HB_Fill.Size = UDim2.fromScale(pct, 1)
+        obj.HB_Fill.AnchorPoint = Vector2.new(0, 0)
+        obj.HB_Fill.Position = UDim2.fromScale(0, 0)
+    else
+        obj.HB_Fill.Size = UDim2.fromScale(1, pct)
+        obj.HB_Fill.AnchorPoint = Vector2.new(0, 1)
+        obj.HB_Fill.Position = UDim2.fromScale(0, 1)
+    end
+
+    -- Fill color
+    if cfg.HB_FILL_COLOR then
+        obj.HB_Fill.BackgroundColor3 = cfg.HB_FILL_COLOR
+    else
+        obj.HB_Fill.BackgroundColor3 = Color3.fromRGB(
+            255 * (1 - pct),
+            255 * pct,
+            0
+        )
+    end
+
+    -- Optional number
+    if obj.HB_Number then
+        if cfg.HB_NUMBER_SHOW_MAX then
+            obj.HB_Number.Text = string.format("%d/%d", math.floor(hp), math.floor(maxHp))
+        else
+            obj.HB_Number.Text = tostring(math.floor(hp))
+        end
+
+        local numW = 80
+        local numH = cfg.HB_NUMBER_SIZE + 4
+        local hbBack = obj.HB_Back
+
+        if cfg.HB_NUMBER_POSITION == "Inside" then
+            obj.HB_Number.Size     = hbBack.Size
+            obj.HB_Number.Position = hbBack.Position
+        elseif cfg.HB_NUMBER_POSITION == "Above" then
+            obj.HB_Number.Size     = UDim2.fromOffset(numW, numH)
+            obj.HB_Number.Position = UDim2.fromOffset(
+                hbBack.Position.X.Offset + (hbBack.Size.X.Offset - numW) * 0.5,
+                hbBack.Position.Y.Offset - numH - 2
+            )
+        elseif cfg.HB_NUMBER_POSITION == "Below" then
+            obj.HB_Number.Size     = UDim2.fromOffset(numW, numH)
+            obj.HB_Number.Position = UDim2.fromOffset(
+                hbBack.Position.X.Offset + (hbBack.Size.X.Offset - numW) * 0.5,
+                hbBack.Position.Y.Offset + hbBack.Size.Y.Offset + 2
+            )
+        elseif cfg.HB_NUMBER_POSITION == "Left" then
+            obj.HB_Number.Size     = UDim2.fromOffset(numW, numH)
+            obj.HB_Number.Position = UDim2.fromOffset(
+                hbBack.Position.X.Offset - numW - 4,
+                hbBack.Position.Y.Offset + (hbBack.Size.Y.Offset - numH) * 0.5
+            )
+        elseif cfg.HB_NUMBER_POSITION == "Right" then
+            obj.HB_Number.Size     = UDim2.fromOffset(numW, numH)
+            obj.HB_Number.Position = UDim2.fromOffset(
+                hbBack.Position.X.Offset + hbBack.Size.X.Offset + 4,
+                hbBack.Position.Y.Offset + (hbBack.Size.Y.Offset - numH) * 0.5
+            )
+        end
+    end
 end
 
 --------------------------------------------------------------------------------
@@ -270,7 +544,6 @@ end
 function ESP:update()
     local cfg = self.config
 
-    -- Master off switch
     if not cfg.ESPEnabled then
         for _, obj in pairs(self._objects) do
             obj.Highlight.Enabled = false
@@ -298,12 +571,12 @@ function ESP:update()
                     withinRange = dist <= cfg.ESPMaxDistance
                 end
 
-                -- ─── ViewLines state ───────────────────────────────────────
+                -- ViewLines state
                 local hit, vis = self:_getViewLinesState(player)
                 local sightSeen = cfg.INTEGRATION_ENABLED
                     and vis >= cfg.SIGHT_THRESHOLD
 
-                -- ─── Highlight fill transparency ──────────────────────────
+                -- Highlight fill transparency
                 local fillT
                 if cfg.INTEGRATION_ENABLED then
                     if hit then
@@ -317,7 +590,7 @@ function ESP:update()
                     fillT = cfg.HL_BASE_TRANSPARENCY
                 end
 
-                -- ─── Nametag opacity (start with ViewLines state) ─────────
+                -- Nametag opacity
                 local ntAlpha
                 if cfg.INTEGRATION_ENABLED then
                     if hit then
@@ -331,21 +604,17 @@ function ESP:update()
                     ntAlpha = cfg.NT_ALPHA_BASE
                 end
 
-                -- ─── Camera-center override ───────────────────────────────
-                -- If the player is near the screen center, they become
-                -- more opaque proportionally, overriding the ViewLines
-                -- opacity. Final = MIN (more opaque wins).
+                -- Camera-center override
                 if cfg.CENTER_OVERRIDE_ENABLED then
                     local cf = self:_centerFactor(root.Position)
                     if cf > 0 then
                         local centerAlpha = cfg.CENTER_MAX_ALPHA
                             + (1 - cfg.CENTER_MAX_ALPHA) * (1 - cf)
-                        -- Lower transparency value = more opaque
                         ntAlpha = math.min(ntAlpha, centerAlpha)
                     end
                 end
 
-                -- ─── Nametag size ─────────────────────────────────────────
+                -- Nametag size
                 local ntSize
                 if cfg.INTEGRATION_ENABLED then
                     if hit then
@@ -358,49 +627,70 @@ function ESP:update()
                 else
                     ntSize = cfg.NT_SIZE_BASE
                 end
+                self._activeNtSize = ntSize
 
-                -- ─── Nametag bold ─────────────────────────────────────────
-                local ntFont = Enum.Font.Code
+                -- Nametag bold
+                local ntFont = Enum.Font.GothamMedium
                 if cfg.INTEGRATION_ENABLED and cfg.NT_BOLD_ON_LOOK and hit then
-                    ntFont = Enum.Font.Code -- Code has no bold; use GothamBold
                     ntFont = Enum.Font.GothamBold
                 end
 
-                -- ─── Apply highlight ──────────────────────────────────────
-                local nameColor = self:_getNameColor(player)
+                -- Health
+                local hp    = math.floor(self:_getHealth(char))
+                local maxHp = self:_getMaxHealth(char)
 
+                local nameColor = self:_getNameColor(player)
+                local hpColor   = healthColor(hp)
+                local distColor = distanceColor(dist)
+
+                -- Layout
+                local bbW, bbH, textW, textH, nameH, subH, hb = self:_computeLayout()
+                self:_layout(obj, bbW, bbH, textW, textH, nameH, subH, hb)
+
+                -- Apply highlight
                 if self._espVisible and withinRange then
-                    obj.Highlight.Adornee           = char
-                    obj.Highlight.Enabled           = true
-                    obj.Highlight.FillColor         = nameColor
-                    obj.Highlight.OutlineColor      = nameColor
-                    obj.Highlight.FillTransparency  = fillT
+                    obj.Highlight.Adornee          = char
+                    obj.Highlight.Enabled          = true
+                    obj.Highlight.FillColor        = nameColor
+                    obj.Highlight.OutlineColor     = nameColor
+                    obj.Highlight.FillTransparency = fillT
                 else
                     obj.Highlight.Enabled = false
                     obj.Highlight.Adornee = nil
                 end
 
-                -- ─── Apply nametag ────────────────────────────────────────
+                -- Apply text
                 if self._textVisible and cfg.ESPShowText then
                     obj.Billboard.Parent = root
+                    obj.Billboard.Enabled = true
 
-                    local hp       = math.floor(self:_getHealth(char))
-                    local hpColor  = healthColor(hp)
-                    local distCol  = distanceColor(dist)
+                    obj.NameLabel.TextSize         = ntSize
+                    obj.NameLabel.Font             = ntFont
+                    obj.NameLabel.TextColor3       = nameColor
+                    obj.NameLabel.TextTransparency = ntAlpha
 
-                    obj.Label.TextSize       = ntSize
-                    obj.Label.Font           = ntFont
-                    obj.Label.TextTransparency = ntAlpha
+                    obj.SubLabel.TextSize         = ntSize
+                    obj.SubLabel.Font             = ntFont
+                    obj.SubLabel.TextColor3       = nameColor
+                    obj.SubLabel.TextTransparency = ntAlpha
 
-                    obj.Label.Text = string.format(
-                        '<font color="%s">%s</font> | <font color="%s">%d</font> | <font color="%s">%d</font>',
-                        rgb(nameColor),
-                        player.DisplayName,
-                        rgb(hpColor),
-                        hp,
-                        rgb(distCol),
-                        dist
-                    )
+                    if cfg.ESP_NAME_FORMAT == "Vertical" then
+                        obj.NameLabel.Text = player.DisplayName
+                        obj.SubLabel.Text  = string.format(
+                            '<font color="%s">%d</font> | <font color="%s">%d</font>',
+                            rgb(hpColor), hp, rgb(distColor), dist
+                        )
+                    else
+                        obj.NameLabel.Text = string.format(
+                            '<font color="%s">%s</font> | <font color="%s">%d</font> | <font color="%s">%d</font>',
+                            rgb(nameColor), player.DisplayName,
+                            rgb(hpColor), hp,
+                            rgb(distColor), dist
+                        )
+                        obj.SubLabel.Text = ""
+                    end
+
+                    self:_updateHealthbar(obj, hp, maxHp)
                 else
                     obj.Billboard.Parent = nil
                 end
@@ -467,7 +757,6 @@ function ESP:setConfig(partial)
     for k, v in pairs(partial) do
         self.config[k] = v
     end
-    -- Invalidate cached name colors when whitelist/blacklist change
     if partial.ESPWhitelist or partial.ESPBlacklist
         or partial.ESPFriendColor ~= nil or partial.ESPUseTeamColor ~= nil
     then
