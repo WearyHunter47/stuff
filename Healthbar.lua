@@ -1,5 +1,5 @@
 --[[
-    Self Healthbar — module
+    Self Healthbar — module (Kerenzikov V1.1)
     Cursor-anchored HP HUD with damage popups, DPS/HPS tracking, dynamic
     opacity, size pulse, progression modes, circular mode, and a live
     "view list" showing who can see or is aiming at you.
@@ -10,11 +10,13 @@
       • Distance (closer = higher)
       • Name (alphabetical tiebreaker)
 
-    V1.1 additions:
+    V1.1 features:
       • Left-aligned view list rows with optional native "..." truncation
-      • Circular ring spins with the shake, then eases back
+      • Circular ring spins with the shake (proportional to HP fraction),
+        then eases back
       • Size pulse driven by UIScale via NumberValue tween
       • Low-HP progressive scale-up (linear, capped by LOWHP_SCALE_MAX)
+      • Optional text-size exclusion from low-HP scaling
 
     No side effects on require. No auto-start, no print, no global.
 ]]
@@ -100,7 +102,8 @@ local DEFAULTS = {
     SHAKE_ON_DAMAGE     = true,
     SHAKE_ON_HEAL       = true,
 
-    -- Circular ring spins with the shake, then eases back to 0
+    -- Circular ring spins with the shake, proportional to the damage
+    -- fraction of max HP. This value is the MAX rotation at 100% loss.
     SHAKE_ROTATE_CIRCULAR  = true,
     SHAKE_ROTATION_DEGREES = 8,
 
@@ -149,7 +152,6 @@ local DEFAULTS = {
     OPACITY_FADE_IN_RATE          = 20,
     OPACITY_FADE_OUT_RATE         = 2,
 
-    -- When HP drops below this fraction, skip idle fade and hold at OPACITY_MIN
     OPACITY_ALWAYS_VISIBLE_BELOW_ENABLED = false,
     OPACITY_ALWAYS_VISIBLE_BELOW_PCT     = 0.33,
 
@@ -167,9 +169,12 @@ local DEFAULTS = {
     PULSE_HEAL_IN_DURATION = 0.35,
     PULSE_HEAL_OUT_DURATION = 0.70,
 
-    -- Progressive scale-up as HP drops. 1.0 at full HP, LOWHP_SCALE_MAX at 0.
-    LOWHP_SCALE_ENABLED = true,
-    LOWHP_SCALE_MAX     = 1.2,
+    -- Progressive scale-up as HP drops
+    LOWHP_SCALE_ENABLED      = true,
+    LOWHP_SCALE_MAX          = 1.2,
+    -- If false, text labels get a counter-UIScale so they stay at their
+    -- base pixel size even when the bar/ring grows.
+    LOWHP_SCALE_AFFECTS_TEXT = true,
 
     CIRCULAR_ENABLED      = true,
     CIRCULAR_RADIUS       = 40,
@@ -197,7 +202,6 @@ local DEFAULTS = {
     VIEWLIST_COLUMNS         = 1,
     VIEWLIST_COLUMN_GAP      = 4,
 
-    -- Left-aligned text with optional native "..." for overflow
     VIEWLIST_AUTO_TRUNCATE   = true,
 
     VIEWLIST_INCLUDE_SIGHT   = true,
@@ -221,11 +225,6 @@ local DEFAULTS = {
     VIEWLIST_ALPHA_SIGHT     = 0.30,
     VIEWLIST_ALPHA_LOOK      = 0.00,
 
-    -- View list opacity mode:
-    --   "Follow"      — mirrors the HUD (old behavior)
-    --   "Independent" — fixed at VIEWLIST_OPACITY_STATIC
-    --   "Floor"       — follows HUD but never above VIEWLIST_OPACITY_FLOOR
-    --   "Threat"      — driven by highest threat tier in the list
     VIEWLIST_OPACITY_MODE          = "Threat",
     VIEWLIST_OPACITY_STATIC        = 0.3,
     VIEWLIST_OPACITY_FLOOR         = 0.4,
@@ -375,7 +374,7 @@ function SelfHealthbar:_resolveBorderColor(pct, fillColor)
 end
 
 --------------------------------------------------------------------------------
--- NAME FORMAT / TEXT / ANCHORS
+-- NAME / TEXT / ANCHORS
 --------------------------------------------------------------------------------
 function SelfHealthbar:_formatPlayerName(player)
     local cfg = self.config
@@ -451,15 +450,15 @@ function SelfHealthbar:_buildUI()
     hud.Parent                 = root
     self._hud = hud
 
-    -- UIScale lets us scale the entire HUD as one value. Pulse and low-HP
-    -- scales multiply together into this single scale.
+    -- UIScale multiplies the entire HUD as a single value. Pulse and
+    -- low-HP scale both feed into this.
     local uiScale = Instance.new("UIScale")
     uiScale.Scale = 1.0
     uiScale.Parent = hud
     self._uiScale = uiScale
 
-    -- NumberValue holds the transient pulse multiplier so TweenService can
-    -- animate it without clashing with the low-HP scale computation.
+    -- NumberValue drives the pulse multiplier so TweenService can animate
+    -- it without conflicting with the per-frame low-HP computation.
     local pulseVal = Instance.new("NumberValue")
     pulseVal.Name  = "PulseScale"
     pulseVal.Value = 1.0
@@ -508,6 +507,12 @@ function SelfHealthbar:_buildUI()
     textLabel.Parent                 = hud
     self._textLabel = textLabel
 
+    -- Counter-scale so text can stay fixed-size when HUD scales up
+    local textCounter = Instance.new("UIScale")
+    textCounter.Scale = 1
+    textCounter.Parent = textLabel
+    self._textCounterScale = textCounter
+
     self._textUIStroke = nil
     if cfg.TEXT_STROKE_WIDTH and cfg.TEXT_STROKE_WIDTH > 1 then
         local s = Instance.new("UIStroke")
@@ -538,6 +543,11 @@ function SelfHealthbar:_buildUI()
     dpsLabel.Parent                 = hud
     self._dpsLabel = dpsLabel
 
+    local dpsCounter = Instance.new("UIScale")
+    dpsCounter.Scale = 1
+    dpsCounter.Parent = dpsLabel
+    self._dpsCounterScale = dpsCounter
+
     local circular = Instance.new("Frame")
     circular.Name                   = "Circular"
     circular.BackgroundTransparency = 1
@@ -550,8 +560,8 @@ function SelfHealthbar:_buildUI()
 
     self:_rebuildCircular()
 
-    -- ViewList is parented to ROOT, not HUD, so it escapes the CanvasGroup's
-    -- clip bounds. It gets its own CanvasGroup so we can mirror opacity.
+    -- ViewList is parented to ROOT, not HUD, so it escapes the CanvasGroup
+    -- clip. It gets its own CanvasGroup for opacity mirroring.
     local viewListContainer = Instance.new("CanvasGroup")
     viewListContainer.Name                   = "ViewList"
     viewListContainer.BackgroundTransparency = 1
@@ -829,13 +839,11 @@ function SelfHealthbar:_positionViewList()
         visualRows * cfg.VIEWLIST_ROW_HEIGHT
     )
 
-    -- Empty-state label stays centered for aesthetic reasons
     self._viewListEmpty.AnchorPoint     = Vector2.new(0.5, 0)
     self._viewListEmpty.Position        = UDim2.new(0.5, 0, 0, 0)
     self._viewListEmpty.Size            = UDim2.new(1, 0, 0, cfg.VIEWLIST_ROW_HEIGHT)
     self._viewListEmpty.TextXAlignment  = Enum.TextXAlignment.Center
 
-    -- Rows: left-aligned, anchored to their column's left edge
     for i, row in ipairs(self._viewListRows) do
         local col       = (i - 1) % cols
         local visualRow = math.floor((i - 1) / cols)
@@ -952,7 +960,7 @@ function SelfHealthbar:_spawnIndicator(delta)
     end)
 end
 
-function SelfHealthbar:_triggerShake(deltaMagnitude)
+function SelfHealthbar:_triggerShake(deltaMagnitude, maxHP)
     local cfg = self.config
     if not cfg.SHAKE_ENABLED then return end
     if self._shakeActive then return end
@@ -974,14 +982,19 @@ function SelfHealthbar:_triggerShake(deltaMagnitude)
     )
     t1:Play()
 
-    -- Circular ring spins in the direction of the horizontal shake
-    -- component, then eases back to 0.
+    -- Circular ring rotation scales with the fraction of max HP the event
+    -- represented. 10% damage → 10% of SHAKE_ROTATION_DEGREES. Many tiny
+    -- hits produce vibration; one big hit produces a single dramatic swing.
     if cfg.SHAKE_ROTATE_CIRCULAR
         and cfg.CIRCULAR_ENABLED
         and self._circular
+        and maxHP and maxHP > 0
     then
+        local fraction = math.clamp(deltaMagnitude / maxHP, 0, 1)
         local direction = (dx >= 0) and 1 or -1
-        local rotDeg = direction * (cfg.SHAKE_ROTATION_DEGREES or 8)
+        local rotDeg = direction
+            * (cfg.SHAKE_ROTATION_DEGREES or 8)
+            * fraction
 
         self._circular.Rotation = 0
 
@@ -1031,7 +1044,7 @@ function SelfHealthbar:_triggerPulse(delta, maxHP)
     local outDuration = isDamage and cfg.PULSE_OUT_DURATION or cfg.PULSE_HEAL_OUT_DURATION
 
     -- TweenService auto-cancels any tween targeting the same property on
-    -- the same instance, so back-to-back damage/heal events compose cleanly.
+    -- the same instance, so back-to-back events compose cleanly.
     local inTween = TweenService:Create(
         self._pulseValue,
         TweenInfo.new(inDuration, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
@@ -1082,9 +1095,9 @@ function SelfHealthbar:_onHealthChanged(newHP, maxHP)
 
     local cfg = self.config
     if delta < 0 and cfg.SHAKE_ON_DAMAGE then
-        self:_triggerShake(math.abs(delta))
+        self:_triggerShake(math.abs(delta), maxHP)
     elseif delta > 0 and cfg.SHAKE_ON_HEAL then
-        self:_triggerShake(math.abs(delta))
+        self:_triggerShake(math.abs(delta), maxHP)
     end
 
     self:_triggerPulse(delta, maxHP)
@@ -1196,7 +1209,6 @@ function SelfHealthbar:_updateViewList(currentPct)
                 dist = (myRoot.Position - theirRoot.Position).Magnitude
             end
 
-            -- Offscreen check (mirrors SEI)
             local offscreen = false
             if cam and theirRoot then
                 local _, onScreen = cam:WorldToViewportPoint(theirRoot.Position)
@@ -1288,7 +1300,6 @@ function SelfHealthbar:_updateViewList(currentPct)
     self._viewListContainer.Visible = true
     self._viewListEmpty.Visible = false
 
-    -- Record highest threat so update() can compute view list opacity
     self._viewListHighestThreat = entries[1].threat or 0
 
     self:_ensureViewListRow(#entries)
@@ -1490,6 +1501,19 @@ function SelfHealthbar:update()
 
     if self._uiScale then
         self._uiScale.Scale = combinedScale
+    end
+
+    -- Counter-scale text when user wants text at fixed size regardless
+    -- of the HUD's low-HP / pulse scaling.
+    local counter = (cfg.LOWHP_SCALE_AFFECTS_TEXT == false)
+        and (1 / math.max(combinedScale, 1e-3))
+        or 1
+
+    if self._textCounterScale then
+        self._textCounterScale.Scale = counter
+    end
+    if self._dpsCounterScale then
+        self._dpsCounterScale.Scale = counter
     end
 
     self._hud.GroupTransparency = finalHudAlpha
