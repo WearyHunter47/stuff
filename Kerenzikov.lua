@@ -1,12 +1,11 @@
---[[ 
->> Kerenzikov V1.0
+--[[ //Kerenzikov V1.1\\
    Configs below.
 ]]
 
 --------------------------------------------------------------------------------
 -- MODULE SOURCES
 --------------------------------------------------------------------------------
-local VL_URL  = "https://raw.githubusercontent.com/WearyHunter47/stuff/refs/heads/main/LoSD"
+local VL_URL  = "https://raw.githubusercontent.com/WearyHunter47/stuff/refs/heads/main/LoSD.lua"
 local ESP_URL = "https://raw.githubusercontent.com/WearyHunter47/stuff/refs/heads/main/ESP.lua"
 local HB_URL  = "https://raw.githubusercontent.com/WearyHunter47/stuff/refs/heads/main/Healthbar.lua"
 
@@ -65,6 +64,11 @@ local CONFIG = {
         IGNORE_WATER    = true,
         UPDATE_INTERVAL = 0,
         MAX_DISTANCE    = 0,
+
+        -- Beam occlusion: fade beams and dots when you look straight at them
+        BEAM_OCCLUDE_ENABLED    = true,
+        BEAM_OCCLUDE_THRESHOLD  = 0.85,   -- dot product; 0.85 ≈ within 32° of camera forward
+        BEAM_OCCLUDE_MIN_ALPHA  = 0.9,    -- max transparency the beam reaches
         KILL_KEYBIND    = nil,   -- master owns the kill switch
 
         -- Edge indicators (SEI)
@@ -304,6 +308,17 @@ local CONFIG = {
         SHAKE_DIRECTION     = Enum.EasingDirection.Out,
         SHAKE_ON_DAMAGE     = true,
         SHAKE_ON_HEAL       = true,
+        -- Circular shake rotation
+        SHAKE_ROTATE_CIRCULAR    = true,
+        SHAKE_ROTATION_DEGREES   = 20,
+
+        -- Low HP progressive scale-up
+        LOWHP_SCALE_ENABLED       = true,
+        LOWHP_SCALE_MAX           = 1.5,   -- multiplier at 0% HP; lerps from 1.0
+        -- If true, the low-HP scale-up multiplies text size along with
+        -- the bar/ring. Set false to keep text at a fixed pixel size
+        -- while the bar visually grows.
+        LOWHP_SCALE_AFFECTS_TEXT = true,
 
         INDICATOR_ENABLED        = true,
         INDICATOR_DURATION       = 1.2,
@@ -434,6 +449,9 @@ local CONFIG = {
 
         VIEWLIST_EMPTY_TEXT  = "",
         VIEWLIST_EMPTY_COLOR = Color3.fromRGB(150, 150, 150),
+
+        -- View list text alignment
+        VIEWLIST_AUTO_TRUNCATE   = true,   -- Roblox native "..." truncation for overflow
 
         KILL_KEYBIND    = nil,
         UPDATE_INTERVAL = 0,
