@@ -10,6 +10,9 @@
       • Base alpha 0.65, sight 0.3, look 0.0
       • Colors: white default, team option, proximity override (orange→red)
 
+    View list is parented to Root (not HUD) so it escapes the CanvasGroup
+    clip — otherwise rows past the HUD's height get discarded silently.
+
     No side effects on require. No auto-start, no print, no global.
 ]]
 
@@ -139,6 +142,11 @@ local DEFAULTS = {
     OPACITY_FADE_IN_RATE          = 20,
     OPACITY_FADE_OUT_RATE         = 2,
 
+    -- When HP drops below this fraction, skip the idle fade entirely and
+    -- hold the HUD at OPACITY_MIN until HP recovers.
+    OPACITY_ALWAYS_VISIBLE_BELOW_ENABLED = false,
+    OPACITY_ALWAYS_VISIBLE_BELOW_PCT     = 0.33,
+
     ALWAYS_VISIBLE       = false,
     ALWAYS_VISIBLE_ALPHA = 0.15,
 
@@ -164,12 +172,10 @@ local DEFAULTS = {
     CIRCULAR_UNFILLED_COLOR = Color3.fromRGB(40, 40, 40),
     CIRCULAR_UNFILLED_TRANSPARENCY = 0.4,
 
-    -- ─── Shared name formatting ────────────────────────────────────────
     NAME_MODE                 = "DisplayName",
     NAME_TRUNCATE_USERNAME    = 8,
     NAME_TRUNCATE_DISPLAYNAME = 8,
 
-    -- ─── View list ─────────────────────────────────────────────────────
     VIEWLIST_ENABLED         = true,
     VIEWLIST_WIDTH_MULT      = 1.25,
     VIEWLIST_STACK_GAP       = 6,
@@ -178,21 +184,16 @@ local DEFAULTS = {
     VIEWLIST_MAX_ROWS        = 8,
     VIEWLIST_ROW_HEIGHT      = 16,
 
-    -- Which categories of player to include
+    VIEWLIST_COLUMNS         = 1,
+    VIEWLIST_COLUMN_GAP      = 4,
+
     VIEWLIST_INCLUDE_SIGHT   = true,
     VIEWLIST_INCLUDE_LOOK    = true,
     VIEWLIST_INCLUDE_IDLE    = false,
     VIEWLIST_IDLE_MAX_DISTANCE = 100,
 
-    -- Sort modes:
-    --   "Priority" — threat (look>sight>idle), then distance, then name
-    --   "Threat"   — threat, then sight vis fraction, then name
-    --   "Distance" — distance only
-    --   "Alpha"    — name only
-    --   "Team"     — team, then name
     VIEWLIST_SORT            = "Priority",
-
-    VIEWLIST_COLOR_MODE      = "Team",   -- "Team" | "Healthbar" | "Fixed"
+    VIEWLIST_COLOR_MODE      = "Team",
     VIEWLIST_FIXED_COLOR     = Color3.fromRGB(255, 255, 255),
     VIEWLIST_SIGHT_THRESHOLD = 0.1,
 
@@ -201,19 +202,14 @@ local DEFAULTS = {
     VIEWLIST_SIZE_IDLE       = 10,
     VIEWLIST_BOLD_ON_LOOK    = true,
 
-    -- Alpha tiers: idle → sight → look
     VIEWLIST_ALPHA_BASE      = 0.65,
     VIEWLIST_ALPHA_SIGHT     = 0.30,
     VIEWLIST_ALPHA_LOOK      = 0.00,
 
-    -- ─── Proximity color override ──────────────────────────────────────
-    -- When an entry is closer than PROXIMITY_DISTANCE studs, its color
-    -- is forced to a lerp between NEAR (at 0 studs) and FAR (at the
-    -- threshold), regardless of the color mode above.
     VIEWLIST_PROXIMITY_ENABLED    = true,
     VIEWLIST_PROXIMITY_DISTANCE   = 100,
-    VIEWLIST_PROXIMITY_NEAR_COLOR = Color3.fromRGB(255, 30, 30),    -- red, at 0 studs
-    VIEWLIST_PROXIMITY_FAR_COLOR  = Color3.fromRGB(255, 165, 0),    -- orange, at threshold
+    VIEWLIST_PROXIMITY_NEAR_COLOR = Color3.fromRGB(255, 30, 30),
+    VIEWLIST_PROXIMITY_FAR_COLOR  = Color3.fromRGB(255, 165, 0),
 
     VIEWLIST_EMPTY_TEXT  = "",
     VIEWLIST_EMPTY_COLOR = Color3.fromRGB(150, 150, 150),
@@ -350,9 +346,6 @@ function SelfHealthbar:_resolveBorderColor(pct, fillColor)
     return cfg.BAR_BORDER_COLOR
 end
 
---------------------------------------------------------------------------------
--- NAME FORMATTING
---------------------------------------------------------------------------------
 function SelfHealthbar:_formatPlayerName(player)
     local cfg = self.config
     local mode = cfg.NAME_MODE or "DisplayName"
@@ -367,9 +360,6 @@ function SelfHealthbar:_formatPlayerName(player)
     end
 end
 
---------------------------------------------------------------------------------
--- TEXT FORMAT / ANCHORS
---------------------------------------------------------------------------------
 function SelfHealthbar:_formatText(hp, maxHp, pct)
     local f = self.config.TEXT_FORMAT
     local hpI = math.floor(hp)
@@ -515,14 +505,17 @@ function SelfHealthbar:_buildUI()
 
     self:_rebuildCircular()
 
-    local viewListContainer = Instance.new("Frame")
+    -- ViewList is parented to ROOT, not HUD, so it escapes the CanvasGroup's
+    -- clip bounds. It gets its own CanvasGroup so we can mirror opacity.
+    local viewListContainer = Instance.new("CanvasGroup")
     viewListContainer.Name                   = "ViewList"
     viewListContainer.BackgroundTransparency = 1
     viewListContainer.AnchorPoint            = Vector2.new(0.5, 0)
     viewListContainer.Position               = UDim2.new(0.5, 0, 0.5, 0)
     viewListContainer.Size                   = UDim2.fromOffset(100, 0)
+    viewListContainer.GroupTransparency      = 0
     viewListContainer.Visible                = false
-    viewListContainer.Parent                 = hud
+    viewListContainer.Parent                 = root
     self._viewListContainer = viewListContainer
 
     local emptyLabel = Instance.new("TextLabel")
@@ -598,7 +591,7 @@ function SelfHealthbar:_ensureViewListRow(n)
         row.Name                   = "ViewRow_" .. (#self._viewListRows + 1)
         row.BackgroundTransparency = 1
         row.AnchorPoint            = Vector2.new(0.5, 0)
-        row.Position               = UDim2.new(0.5, 0, 0, #self._viewListRows * self.config.VIEWLIST_ROW_HEIGHT)
+        row.Position               = UDim2.new(0, 0, 0, 0)
         row.Size                   = UDim2.new(1, 0, 0, self.config.VIEWLIST_ROW_HEIGHT)
         row.Font                   = Enum.Font.Gotham
         row.TextScaled             = false
@@ -774,17 +767,34 @@ function SelfHealthbar:_positionViewList()
     local vlWidth = self:_healthbarWidthPx() * cfg.VIEWLIST_WIDTH_MULT
     local rowCount = math.max(1, #self._viewListRows)
 
+    local cols = math.max(1, cfg.VIEWLIST_COLUMNS or 1)
+    local gap  = cfg.VIEWLIST_COLUMN_GAP or 0
+
+    local visualRows = math.max(1, math.ceil(rowCount / cols))
+    local colWidth   = (vlWidth - gap * (cols - 1)) / cols
+
     self._viewListContainer.Position = UDim2.new(
         0.5, cfg.VIEWLIST_OFFSET_X or 0,
         0.5, vlTop
     )
     self._viewListContainer.Size = UDim2.fromOffset(
         vlWidth,
-        rowCount * cfg.VIEWLIST_ROW_HEIGHT
+        visualRows * cfg.VIEWLIST_ROW_HEIGHT
     )
 
+    self._viewListEmpty.Position = UDim2.new(0.5, 0, 0, 0)
+    self._viewListEmpty.Size     = UDim2.new(1, 0, 0, cfg.VIEWLIST_ROW_HEIGHT)
+
     for i, row in ipairs(self._viewListRows) do
-        row.Position = UDim2.new(0.5, 0, 0, (i - 1) * cfg.VIEWLIST_ROW_HEIGHT)
+        local col       = (i - 1) % cols
+        local visualRow = math.floor((i - 1) / cols)
+
+        row.Size = UDim2.fromOffset(colWidth, cfg.VIEWLIST_ROW_HEIGHT)
+        row.Position = UDim2.new(
+            0, col * (colWidth + gap) + colWidth / 2,
+            0, visualRow * cfg.VIEWLIST_ROW_HEIGHT
+        )
+        row.AnchorPoint = Vector2.new(0.5, 0)
     end
 end
 
@@ -1077,11 +1087,9 @@ function SelfHealthbar:_updateViewList(currentPct)
         return
     end
 
-    -- My position for distance calc
     local myChar = LocalPlayer.Character
     local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
 
-    -- Build entry list
     local entries = {}
     for _, player in ipairs(Players:GetPlayers()) do
         if player ~= LocalPlayer then
@@ -1089,7 +1097,6 @@ function SelfHealthbar:_updateViewList(currentPct)
             local vis = bus.ViewLines.Visibility[player] or 0
             local sightSeen = vis >= (cfg.VIEWLIST_SIGHT_THRESHOLD or 0.1)
 
-            -- Distance (math.huge when either side lacks a root)
             local dist = math.huge
             local theirChar = player.Character
             local theirRoot = theirChar and theirChar:FindFirstChild("HumanoidRootPart")
@@ -1097,12 +1104,10 @@ function SelfHealthbar:_updateViewList(currentPct)
                 dist = (myRoot.Position - theirRoot.Position).Magnitude
             end
 
-            -- Threat tier: 2=look, 1=sight, 0=idle
             local threat = 0
             if hit then threat = 2
             elseif sightSeen then threat = 1 end
 
-            -- Inclusion
             local include = false
             if hit and cfg.VIEWLIST_INCLUDE_LOOK then
                 include = true
@@ -1127,7 +1132,6 @@ function SelfHealthbar:_updateViewList(currentPct)
         end
     end
 
-    -- Sort
     local sortMode = cfg.VIEWLIST_SORT or "Priority"
     if sortMode == "Priority" then
         table.sort(entries, function(a, b)
@@ -1142,9 +1146,7 @@ function SelfHealthbar:_updateViewList(currentPct)
             return a.player.Name:lower() < b.player.Name:lower()
         end)
     elseif sortMode == "Distance" then
-        table.sort(entries, function(a, b)
-            return a.distance < b.distance
-        end)
+        table.sort(entries, function(a, b) return a.distance < b.distance end)
     elseif sortMode == "Alpha" then
         table.sort(entries, function(a, b)
             return a.player.Name:lower() < b.player.Name:lower()
@@ -1158,12 +1160,10 @@ function SelfHealthbar:_updateViewList(currentPct)
         end)
     end
 
-    -- Cap
     while #entries > cfg.VIEWLIST_MAX_ROWS do
         table.remove(entries)
     end
 
-    -- Empty state
     if #entries == 0 then
         if cfg.VIEWLIST_EMPTY_TEXT == "" then
             self._viewListContainer.Visible = false
@@ -1189,7 +1189,6 @@ function SelfHealthbar:_updateViewList(currentPct)
         row.Visible = true
         row.Text    = self:_formatPlayerName(entry.player)
 
-        -- ─── Size / font / transparency by threat tier ─────────────
         if entry.hit then
             row.TextSize         = cfg.VIEWLIST_SIZE_LOOK
             row.Font             = cfg.VIEWLIST_BOLD_ON_LOOK
@@ -1200,28 +1199,25 @@ function SelfHealthbar:_updateViewList(currentPct)
             row.TextSize         = cfg.VIEWLIST_SIZE_SIGHT
             row.Font             = Enum.Font.Gotham
             row.TextTransparency = cfg.VIEWLIST_ALPHA_SIGHT
-        else -- idle
+        else
             row.TextSize         = cfg.VIEWLIST_SIZE_IDLE
             row.Font             = Enum.Font.Gotham
             row.TextTransparency = cfg.VIEWLIST_ALPHA_BASE
         end
 
-        -- ─── Color mode ────────────────────────────────────────────
         local color
         if cfg.VIEWLIST_COLOR_MODE == "Fixed" then
             color = cfg.VIEWLIST_FIXED_COLOR
         elseif cfg.VIEWLIST_COLOR_MODE == "Healthbar" then
             color = self:_resolveFillColor(currentPct)
-        else -- "Team"
+        else
             color = self:_getPlayerTeamColor(entry.player)
                 or Color3.fromRGB(255, 255, 255)
         end
 
-        -- ─── Proximity override (fires regardless of mode) ─────────
         if cfg.VIEWLIST_PROXIMITY_ENABLED
             and entry.distance < (cfg.VIEWLIST_PROXIMITY_DISTANCE or 100)
         then
-            -- t = 0 at 0 studs (red), t = 1 at threshold (orange)
             local t = clamp(entry.distance / cfg.VIEWLIST_PROXIMITY_DISTANCE, 0, 1)
             color = cfg.VIEWLIST_PROXIMITY_NEAR_COLOR:Lerp(
                 cfg.VIEWLIST_PROXIMITY_FAR_COLOR, t
@@ -1231,7 +1227,6 @@ function SelfHealthbar:_updateViewList(currentPct)
         row.TextColor3 = color
     end
 
-    -- Hide unused rows
     for i = #entries + 1, #self._viewListRows do
         self._viewListRows[i].Visible = false
     end
@@ -1249,6 +1244,9 @@ function SelfHealthbar:update()
 
     if not hum or hum.Health <= 0 then
         self._hud.GroupTransparency = 1
+        if self._viewListContainer then
+            self._viewListContainer.GroupTransparency = 1
+        end
         return
     end
 
@@ -1333,11 +1331,17 @@ function SelfHealthbar:update()
     self:_updateViewList(pct)
 
     -- Dynamic opacity
+    local finalHudAlpha
     if cfg.ALWAYS_VISIBLE then
-        self._hud.GroupTransparency = cfg.ALWAYS_VISIBLE_ALPHA
+        finalHudAlpha = cfg.ALWAYS_VISIBLE_ALPHA
     elseif cfg.OPACITY_ENABLED then
+        local overrideAlwaysOn = cfg.OPACITY_ALWAYS_VISIBLE_BELOW_ENABLED
+            and pct < (cfg.OPACITY_ALWAYS_VISIBLE_BELOW_PCT or 0.33)
+
         local targetAlpha
-        if pct >= 0.999 then
+        if overrideAlwaysOn then
+            targetAlpha = cfg.OPACITY_MIN
+        elseif pct >= 0.999 then
             if not self._lastFullHPTime then self._lastFullHPTime = now end
             if now - self._lastFullHPTime > cfg.OPACITY_FULL_HP_DELAY then
                 targetAlpha = cfg.OPACITY_FULL_HP_TRANSPARENCY
@@ -1365,9 +1369,14 @@ function SelfHealthbar:update()
             or  cfg.OPACITY_FADE_OUT_RATE
         self._currentAlpha = self._currentAlpha
             + (targetAlpha - self._currentAlpha) * math.min(dt * rate, 1)
-        self._hud.GroupTransparency = clamp(self._currentAlpha, 0, 1)
+        finalHudAlpha = clamp(self._currentAlpha, 0, 1)
     else
-        self._hud.GroupTransparency = 0
+        finalHudAlpha = 0
+    end
+
+    self._hud.GroupTransparency = finalHudAlpha
+    if self._viewListContainer then
+        self._viewListContainer.GroupTransparency = finalHudAlpha
     end
 end
 
