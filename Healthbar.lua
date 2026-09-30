@@ -1111,7 +1111,17 @@ function SelfHealthbar:_updateViewList(currentPct)
             if myRoot and theirRoot then
                 dist = (myRoot.Position - theirRoot.Position).Magnitude
             end
-
+            -- Offscreen check: mirror the SEI's test so a viewer behind you
+            -- or outside your viewport ranks above one already in view.
+            local offscreen = false
+            local cam = workspace.CurrentCamera
+            if cam and theirRoot then
+                local _, onScreen = cam:WorldToViewportPoint(theirRoot.Position)
+                local camSpace     = cam.CFrame:PointToObjectSpace(theirRoot.Position)
+                local behind       = camSpace.Z >= 0
+                offscreen = (not onScreen) or behind
+            end
+            
             local threat = 0
             if hit then threat = 2
             elseif sightSeen then threat = 1 end
@@ -1135,6 +1145,7 @@ function SelfHealthbar:_updateViewList(currentPct)
                     vis       = vis,
                     threat    = threat,
                     distance  = dist,
+                    offscreen = offscreen,
                 }
             end
         end
@@ -1144,6 +1155,9 @@ function SelfHealthbar:_updateViewList(currentPct)
     if sortMode == "Priority" then
         table.sort(entries, function(a, b)
             if a.threat ~= b.threat then return a.threat > b.threat end
+            if cfg.VIEWLIST_PRIORITIZE_OFFSCREEN and a.offscreen ~= b.offscreen then
+                return a.offscreen
+            end
             if a.distance ~= b.distance then return a.distance < b.distance end
             return a.player.Name:lower() < b.player.Name:lower()
         end)
