@@ -5,13 +5,16 @@
     "view list" showing who can see or is aiming at you.
 
     View list priorities:
-      • Threat tier (look > sight > idle) is the primary sort key
-      • Distance is the secondary sort key (closer = higher)
-      • Base alpha 0.65, sight 0.3, look 0.0
-      • Colors: white default, team option, proximity override (orange→red)
+      • Threat tier (look > sight > idle)
+      • Off-screen viewers rank above on-screen ones (same tier)
+      • Distance (closer = higher)
+      • Name (alphabetical tiebreaker)
 
-    View list is parented to Root (not HUD) so it escapes the CanvasGroup
-    clip — otherwise rows past the HUD's height get discarded silently.
+    V1.1 additions:
+      • Left-aligned view list rows with optional native "..." truncation
+      • Circular ring spins with the shake, then eases back
+      • Size pulse driven by UIScale via NumberValue tween
+      • Low-HP progressive scale-up (linear, capped by LOWHP_SCALE_MAX)
 
     No side effects on require. No auto-start, no print, no global.
 ]]
@@ -97,6 +100,10 @@ local DEFAULTS = {
     SHAKE_ON_DAMAGE     = true,
     SHAKE_ON_HEAL       = true,
 
+    -- Circular ring spins with the shake, then eases back to 0
+    SHAKE_ROTATE_CIRCULAR  = true,
+    SHAKE_ROTATION_DEGREES = 8,
+
     INDICATOR_ENABLED        = true,
     INDICATOR_DURATION       = 1.2,
     INDICATOR_SIZE           = 14,
@@ -142,8 +149,7 @@ local DEFAULTS = {
     OPACITY_FADE_IN_RATE          = 20,
     OPACITY_FADE_OUT_RATE         = 2,
 
-    -- When HP drops below this fraction, skip the idle fade entirely and
-    -- hold the HUD at OPACITY_MIN until HP recovers.
+    -- When HP drops below this fraction, skip idle fade and hold at OPACITY_MIN
     OPACITY_ALWAYS_VISIBLE_BELOW_ENABLED = false,
     OPACITY_ALWAYS_VISIBLE_BELOW_PCT     = 0.33,
 
@@ -160,6 +166,10 @@ local DEFAULTS = {
     PULSE_OUT_DURATION     = 0.40,
     PULSE_HEAL_IN_DURATION = 0.35,
     PULSE_HEAL_OUT_DURATION = 0.70,
+
+    -- Progressive scale-up as HP drops. 1.0 at full HP, LOWHP_SCALE_MAX at 0.
+    LOWHP_SCALE_ENABLED = true,
+    LOWHP_SCALE_MAX     = 1.2,
 
     CIRCULAR_ENABLED      = true,
     CIRCULAR_RADIUS       = 40,
@@ -187,12 +197,17 @@ local DEFAULTS = {
     VIEWLIST_COLUMNS         = 1,
     VIEWLIST_COLUMN_GAP      = 4,
 
+    -- Left-aligned text with optional native "..." for overflow
+    VIEWLIST_AUTO_TRUNCATE   = true,
+
     VIEWLIST_INCLUDE_SIGHT   = true,
     VIEWLIST_INCLUDE_LOOK    = true,
     VIEWLIST_INCLUDE_IDLE    = false,
     VIEWLIST_IDLE_MAX_DISTANCE = 100,
 
-    VIEWLIST_SORT            = "Priority",
+    VIEWLIST_SORT                 = "Priority",
+    VIEWLIST_PRIORITIZE_OFFSCREEN = true,
+
     VIEWLIST_COLOR_MODE      = "Team",
     VIEWLIST_FIXED_COLOR     = Color3.fromRGB(255, 255, 255),
     VIEWLIST_SIGHT_THRESHOLD = 0.1,
@@ -206,13 +221,18 @@ local DEFAULTS = {
     VIEWLIST_ALPHA_SIGHT     = 0.30,
     VIEWLIST_ALPHA_LOOK      = 0.00,
 
+    -- View list opacity mode:
+    --   "Follow"      — mirrors the HUD (old behavior)
+    --   "Independent" — fixed at VIEWLIST_OPACITY_STATIC
+    --   "Floor"       — follows HUD but never above VIEWLIST_OPACITY_FLOOR
+    --   "Threat"      — driven by highest threat tier in the list
     VIEWLIST_OPACITY_MODE          = "Threat",
     VIEWLIST_OPACITY_STATIC        = 0.3,
     VIEWLIST_OPACITY_FLOOR         = 0.4,
     VIEWLIST_OPACITY_THREAT_LOOK   = 0.0,
     VIEWLIST_OPACITY_THREAT_SIGHT  = 0.3,
     VIEWLIST_OPACITY_THREAT_IDLE   = 0.6,
-    
+
     VIEWLIST_PROXIMITY_ENABLED    = true,
     VIEWLIST_PROXIMITY_DISTANCE   = 100,
     VIEWLIST_PROXIMITY_NEAR_COLOR = Color3.fromRGB(255, 30, 30),
@@ -263,24 +283,24 @@ function SelfHealthbar.new(overrides)
         for k, v in pairs(overrides) do self.config[k] = v end
     end
 
-    self._humanoid       = nil
-    self._character      = nil
-    self._charConn       = nil
-    self._lastHealth     = nil
-    self._lastChangeTime = 0
-    self._lastFullHPTime = nil
-    self._recentChanges  = {}
-    self._currentAlpha   = 0.15
-    self._barWidthPx     = 180
-    self._barHeightPx    = 11
-    self._hudSize        = UDim2.fromOffset(380, 151)
-    self._shakeActive    = false
-    self._ringSegments   = {}
-    self._viewListRows   = {}
-    self._viewListHighestThreat  = 0
-    self._lastUpdate     = 0
-    self._lastDt         = 1 / 60
-    self._lastTick       = os.clock()
+    self._humanoid              = nil
+    self._character             = nil
+    self._charConn              = nil
+    self._lastHealth            = nil
+    self._lastChangeTime        = 0
+    self._lastFullHPTime        = nil
+    self._recentChanges         = {}
+    self._currentAlpha          = 0.15
+    self._barWidthPx            = 180
+    self._barHeightPx           = 11
+    self._hudSize               = UDim2.fromOffset(380, 151)
+    self._shakeActive           = false
+    self._ringSegments          = {}
+    self._viewListRows          = {}
+    self._viewListHighestThreat = 0
+    self._lastUpdate            = 0
+    self._lastDt                = 1 / 60
+    self._lastTick              = os.clock()
 
     self._connections = {}
     self._running     = false
@@ -354,6 +374,9 @@ function SelfHealthbar:_resolveBorderColor(pct, fillColor)
     return cfg.BAR_BORDER_COLOR
 end
 
+--------------------------------------------------------------------------------
+-- NAME FORMAT / TEXT / ANCHORS
+--------------------------------------------------------------------------------
 function SelfHealthbar:_formatPlayerName(player)
     local cfg = self.config
     local mode = cfg.NAME_MODE or "DisplayName"
@@ -427,6 +450,20 @@ function SelfHealthbar:_buildUI()
     hud.GroupTransparency      = 0
     hud.Parent                 = root
     self._hud = hud
+
+    -- UIScale lets us scale the entire HUD as one value. Pulse and low-HP
+    -- scales multiply together into this single scale.
+    local uiScale = Instance.new("UIScale")
+    uiScale.Scale = 1.0
+    uiScale.Parent = hud
+    self._uiScale = uiScale
+
+    -- NumberValue holds the transient pulse multiplier so TweenService can
+    -- animate it without clashing with the low-HP scale computation.
+    local pulseVal = Instance.new("NumberValue")
+    pulseVal.Name  = "PulseScale"
+    pulseVal.Value = 1.0
+    self._pulseValue = pulseVal
 
     local bar = Instance.new("Frame")
     bar.Name                   = "Bar"
@@ -540,6 +577,7 @@ function SelfHealthbar:_buildUI()
     emptyLabel.TextStrokeColor3       = Color3.fromRGB(0, 0, 0)
     emptyLabel.Text                   = ""
     emptyLabel.Visible                = false
+    emptyLabel.TextXAlignment         = Enum.TextXAlignment.Center
     emptyLabel.Parent                 = viewListContainer
     self._viewListEmpty = emptyLabel
 end
@@ -598,7 +636,7 @@ function SelfHealthbar:_ensureViewListRow(n)
         local row = Instance.new("TextLabel")
         row.Name                   = "ViewRow_" .. (#self._viewListRows + 1)
         row.BackgroundTransparency = 1
-        row.AnchorPoint            = Vector2.new(0.5, 0)
+        row.AnchorPoint            = Vector2.new(0, 0)
         row.Position               = UDim2.new(0, 0, 0, 0)
         row.Size                   = UDim2.new(1, 0, 0, self.config.VIEWLIST_ROW_HEIGHT)
         row.Font                   = Enum.Font.Gotham
@@ -607,6 +645,7 @@ function SelfHealthbar:_ensureViewListRow(n)
         row.TextColor3             = Color3.new(1, 1, 1)
         row.TextStrokeTransparency = 0.6
         row.TextStrokeColor3       = Color3.fromRGB(0, 0, 0)
+        row.TextXAlignment         = Enum.TextXAlignment.Left
         row.Text                   = ""
         row.Visible                = false
         row.Parent                 = self._viewListContainer
@@ -790,19 +829,27 @@ function SelfHealthbar:_positionViewList()
         visualRows * cfg.VIEWLIST_ROW_HEIGHT
     )
 
-    self._viewListEmpty.Position = UDim2.new(0.5, 0, 0, 0)
-    self._viewListEmpty.Size     = UDim2.new(1, 0, 0, cfg.VIEWLIST_ROW_HEIGHT)
+    -- Empty-state label stays centered for aesthetic reasons
+    self._viewListEmpty.AnchorPoint     = Vector2.new(0.5, 0)
+    self._viewListEmpty.Position        = UDim2.new(0.5, 0, 0, 0)
+    self._viewListEmpty.Size            = UDim2.new(1, 0, 0, cfg.VIEWLIST_ROW_HEIGHT)
+    self._viewListEmpty.TextXAlignment  = Enum.TextXAlignment.Center
 
+    -- Rows: left-aligned, anchored to their column's left edge
     for i, row in ipairs(self._viewListRows) do
         local col       = (i - 1) % cols
         local visualRow = math.floor((i - 1) / cols)
 
-        row.Size = UDim2.fromOffset(colWidth, cfg.VIEWLIST_ROW_HEIGHT)
-        row.Position = UDim2.new(
-            0, col * (colWidth + gap) + colWidth / 2,
+        row.AnchorPoint     = Vector2.new(0, 0)
+        row.Position        = UDim2.new(
+            0, col * (colWidth + gap),
             0, visualRow * cfg.VIEWLIST_ROW_HEIGHT
         )
-        row.AnchorPoint = Vector2.new(0.5, 0)
+        row.Size            = UDim2.fromOffset(colWidth, cfg.VIEWLIST_ROW_HEIGHT)
+        row.TextXAlignment  = Enum.TextXAlignment.Left
+        row.TextTruncate    = cfg.VIEWLIST_AUTO_TRUNCATE
+                                and Enum.TextTruncate.AtEnd
+                                or  Enum.TextTruncate.None
     end
 end
 
@@ -833,6 +880,13 @@ function SelfHealthbar:_recomputeBaseSize()
     self:_positionText()
     self:_positionDps()
     self:_positionViewList()
+end
+
+function SelfHealthbar:_computeLowHpScale(pct)
+    local cfg = self.config
+    if not cfg.LOWHP_SCALE_ENABLED then return 1.0 end
+    local maxS = cfg.LOWHP_SCALE_MAX or 1.2
+    return 1.0 + (maxS - 1.0) * (1.0 - pct)
 end
 
 --------------------------------------------------------------------------------
@@ -919,6 +973,34 @@ function SelfHealthbar:_triggerShake(deltaMagnitude)
         { Position = UDim2.new(0.5, dx, 0.5, dy) }
     )
     t1:Play()
+
+    -- Circular ring spins in the direction of the horizontal shake
+    -- component, then eases back to 0.
+    if cfg.SHAKE_ROTATE_CIRCULAR
+        and cfg.CIRCULAR_ENABLED
+        and self._circular
+    then
+        local direction = (dx >= 0) and 1 or -1
+        local rotDeg = direction * (cfg.SHAKE_ROTATION_DEGREES or 8)
+
+        self._circular.Rotation = 0
+
+        local rotTween = TweenService:Create(
+            self._circular,
+            TweenInfo.new(cfg.SHAKE_DURATION, cfg.SHAKE_STYLE, cfg.SHAKE_DIRECTION),
+            { Rotation = rotDeg }
+        )
+        rotTween:Play()
+        rotTween.Completed:Connect(function()
+            local backRot = TweenService:Create(
+                self._circular,
+                TweenInfo.new(cfg.SHAKE_DURATION * 1.5, cfg.SHAKE_STYLE, cfg.SHAKE_DIRECTION),
+                { Rotation = 0 }
+            )
+            backRot:Play()
+        end)
+    end
+
     t1.Completed:Connect(function()
         local back = TweenService:Create(
             self._hud,
@@ -943,27 +1025,26 @@ function SelfHealthbar:_triggerPulse(delta, maxHP)
     factor = math.min(factor, cfg.PULSE_MAX)
     if factor <= 0.001 then return end
 
-    local base = self._hudSize
-    local boosted = UDim2.new(
-        base.X.Scale * (1 + factor), base.X.Offset,
-        base.Y.Scale * (1 + factor), base.Y.Offset
-    )
+    local targetScale = 1 + factor
 
     local inDuration  = isDamage and cfg.PULSE_IN_DURATION  or cfg.PULSE_HEAL_IN_DURATION
     local outDuration = isDamage and cfg.PULSE_OUT_DURATION or cfg.PULSE_HEAL_OUT_DURATION
 
+    -- TweenService auto-cancels any tween targeting the same property on
+    -- the same instance, so back-to-back damage/heal events compose cleanly.
     local inTween = TweenService:Create(
-        self._hud,
+        self._pulseValue,
         TweenInfo.new(inDuration, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
-        { Size = boosted }
+        { Value = targetScale }
     )
     inTween:Play()
     inTween.Completed:Connect(function()
-        TweenService:Create(
-            self._hud,
+        local outTween = TweenService:Create(
+            self._pulseValue,
             TweenInfo.new(outDuration, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut),
-            { Size = base }
-        ):Play()
+            { Value = 1.0 }
+        )
+        outTween:Play()
     end)
 end
 
@@ -1086,17 +1167,20 @@ function SelfHealthbar:_updateViewList(currentPct)
     local cfg = self.config
     if not cfg.VIEWLIST_ENABLED then
         self._viewListContainer.Visible = false
+        self._viewListHighestThreat = 0
         return
     end
 
     local bus = getgenv().ModuleBus
     if not bus or not bus.ViewLines or not bus.ViewLines.Active then
         self._viewListContainer.Visible = false
+        self._viewListHighestThreat = 0
         return
     end
 
     local myChar = LocalPlayer.Character
     local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+    local cam    = workspace.CurrentCamera
 
     local entries = {}
     for _, player in ipairs(Players:GetPlayers()) do
@@ -1111,17 +1195,16 @@ function SelfHealthbar:_updateViewList(currentPct)
             if myRoot and theirRoot then
                 dist = (myRoot.Position - theirRoot.Position).Magnitude
             end
-            -- Offscreen check: mirror the SEI's test so a viewer behind you
-            -- or outside your viewport ranks above one already in view.
+
+            -- Offscreen check (mirrors SEI)
             local offscreen = false
-            local cam = workspace.CurrentCamera
             if cam and theirRoot then
                 local _, onScreen = cam:WorldToViewportPoint(theirRoot.Position)
                 local camSpace     = cam.CFrame:PointToObjectSpace(theirRoot.Position)
                 local behind       = camSpace.Z >= 0
                 offscreen = (not onScreen) or behind
             end
-            
+
             local threat = 0
             if hit then threat = 2
             elseif sightSeen then threat = 1 end
@@ -1187,6 +1270,7 @@ function SelfHealthbar:_updateViewList(currentPct)
     end
 
     if #entries == 0 then
+        self._viewListHighestThreat = 0
         if cfg.VIEWLIST_EMPTY_TEXT == "" then
             self._viewListContainer.Visible = false
         else
@@ -1204,11 +1288,11 @@ function SelfHealthbar:_updateViewList(currentPct)
     self._viewListContainer.Visible = true
     self._viewListEmpty.Visible = false
 
-    self:_ensureViewListRow(#entries)
-    -- Record the highest threat in this frame's list so update() can
-    -- compute the list's own opacity without re-scanning.
+    -- Record highest threat so update() can compute view list opacity
     self._viewListHighestThreat = entries[1].threat or 0
-    
+
+    self:_ensureViewListRow(#entries)
+
     for i, entry in ipairs(entries) do
         local row = self._viewListRows[i]
         row.Visible = true
@@ -1399,18 +1483,27 @@ function SelfHealthbar:update()
         finalHudAlpha = 0
     end
 
+    -- Combined scale (low-HP × pulse) applied as one UIScale
+    local lowHpScale  = self:_computeLowHpScale(pct)
+    local pulseScale  = self._pulseValue and self._pulseValue.Value or 1.0
+    local combinedScale = lowHpScale * pulseScale
+
+    if self._uiScale then
+        self._uiScale.Scale = combinedScale
+    end
+
     self._hud.GroupTransparency = finalHudAlpha
 
-    -- ─── View list opacity (decoupled from HUD) ────────────────────────
+    -- View list opacity (decoupled from HUD)
     if self._viewListContainer then
         local vlAlpha
-        local mode = cfg.VIEWLIST_OPACITY_MODE or "Follow"
+        local vlMode = cfg.VIEWLIST_OPACITY_MODE or "Follow"
 
-        if mode == "Independent" then
+        if vlMode == "Independent" then
             vlAlpha = cfg.VIEWLIST_OPACITY_STATIC
-        elseif mode == "Floor" then
+        elseif vlMode == "Floor" then
             vlAlpha = math.min(finalHudAlpha, cfg.VIEWLIST_OPACITY_FLOOR)
-        elseif mode == "Threat" then
+        elseif vlMode == "Threat" then
             local threat = self._viewListHighestThreat or 0
             if threat >= 2 then
                 vlAlpha = cfg.VIEWLIST_OPACITY_THREAT_LOOK
