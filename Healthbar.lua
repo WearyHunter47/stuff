@@ -1,21 +1,16 @@
 --[[
     Self Healthbar — module
     Cursor-anchored HP HUD with damage popups, DPS/HPS tracking, dynamic
-    opacity, size pulse, progression modes, and optional circular mode.
+    opacity, size pulse, progression modes, circular mode, and a live
+    "view list" showing who can see or is aiming at you.
 
-    Usage:
-        local SelfHealthbar = loadstring(game:HttpGet(URL))()
-        local hb = SelfHealthbar.new({ TEXT_FORMAT = "HPMAX_PCT" })
-        hb:start()
-        -- ...
-        hb:stop()
+    View list priorities:
+      • Threat tier (look > sight > idle) is the primary sort key
+      • Distance is the secondary sort key (closer = higher)
+      • Base alpha 0.65, sight 0.3, look 0.0
+      • Colors: white default, team option, proximity override (orange→red)
 
-    Or drive it manually:
-        hb:update()   -- call from your own RenderStepped/Heartbeat
-
-    Config is hot-swappable:  hb:setConfig({ TEXT_POSITION = "Above" })
-
-    Fires no side effects on require. No auto-start, no print, no global.
+    No side effects on require. No auto-start, no print, no global.
 ]]
 
 local Players          = game:GetService("Players")
@@ -29,23 +24,19 @@ local LocalPlayer = Players.LocalPlayer
 -- DEFAULTS
 --------------------------------------------------------------------------------
 local DEFAULTS = {
-    -- ─── Positioning ───────────────────────────────────────────────────
     CURSOR_OFFSET_X = 0,
     CURSOR_OFFSET_Y = 60,
     FOLLOW_CURSOR   = true,
 
-    -- ─── Bar dimensions ────────────────────────────────────────────────
     BAR_WIDTH_SCALE  = 0.10,
     BAR_WIDTH_PX     = nil,
     BAR_HEIGHT_SCALE = 0.01,
     BAR_HEIGHT_PX    = 8,
 
-    -- ─── HUD padding ───────────────────────────────────────────────────
     PAD_X       = 100,
     PAD_TOP     = 80,
     PAD_BOTTOM  = 60,
 
-    -- ─── Bar colors ────────────────────────────────────────────────────
     BAR_FILL_COLOR_AUTO = true,
     BAR_FILL_COLOR      = Color3.fromRGB(0, 255, 0),
     BAR_FILL_TRANSPARENCY = 0.5,
@@ -62,7 +53,6 @@ local DEFAULTS = {
     USE_TEAM_COLOR_FILL   = false,
     USE_TEAM_COLOR_BORDER = false,
 
-    -- ─── Low-HP override ───────────────────────────────────────────────
     LOWHP_OVERRIDE_ENABLED = true,
     LOWHP_THRESHOLD        = 0.30,
     LOWHP_FILL_TOP         = Color3.fromRGB(255, 0, 0),
@@ -70,9 +60,7 @@ local DEFAULTS = {
     LOWHP_BORDER_TOP       = Color3.fromRGB(128, 0, 0),
     LOWHP_BORDER_BOTTOM    = Color3.fromRGB(0, 0, 0),
 
-    -- ─── HP Text ───────────────────────────────────────────────────────
     TEXT_ENABLED        = true,
-    -- "HP" | "HPMAX" | "PCT" | "HP_PCT" | "HPMAX_PCT"
     TEXT_FORMAT         = "PCT",
     TEXT_SIZE           = 13,
     TEXT_COLOR_AUTO     = true,
@@ -84,7 +72,7 @@ local DEFAULTS = {
     TEXT_LABEL_WIDTH  = 220,
     TEXT_WRAPPED      = false,
 
-    TEXT_POSITION     = "Below",   -- "Above"|"Below"|"Left"|"Right"|"Center"
+    TEXT_POSITION     = "Below",
     TEXT_POSITION_GAP = 4,
     TEXT_OFFSET_X     = 0,
     TEXT_OFFSET_Y     = 0,
@@ -94,10 +82,8 @@ local DEFAULTS = {
     TEXT_STROKE_TRANSPARENCY = 0.3,
     TEXT_STROKE_WIDTH        = 1,
 
-    -- ─── Progression ───────────────────────────────────────────────────
-    PROGRESSION = "Both",   -- "Both" | "Right" | "Left"
+    PROGRESSION = "Both",
 
-    -- ─── Shake ─────────────────────────────────────────────────────────
     SHAKE_ENABLED       = true,
     SHAKE_INTENSITY     = 6,
     SHAKE_INTENSITY_PER_DMG = 0.3,
@@ -108,7 +94,6 @@ local DEFAULTS = {
     SHAKE_ON_DAMAGE     = true,
     SHAKE_ON_HEAL       = true,
 
-    -- ─── Popups ────────────────────────────────────────────────────────
     INDICATOR_ENABLED        = true,
     INDICATOR_DURATION       = 1.2,
     INDICATOR_SIZE           = 14,
@@ -122,9 +107,8 @@ local DEFAULTS = {
     INDICATOR_DAMAGE_SIDE    = -1,
     INDICATOR_HEAL_SIDE      = 1,
 
-    -- ─── DPS/HPS ───────────────────────────────────────────────────────
     DPS_ENABLED      = true,
-    DPS_MODE         = "Weighted",   -- "Average" | "Weighted" | "Instant"
+    DPS_MODE         = "Weighted",
     DPS_WINDOW       = 5,
     DPS_DECAY_TIME   = 3,
     DPS_THRESHOLD    = 0.5,
@@ -145,7 +129,6 @@ local DEFAULTS = {
     DPS_OFFSET_X     = 0,
     DPS_OFFSET_Y     = 0,
 
-    -- ─── Dynamic opacity ───────────────────────────────────────────────
     OPACITY_ENABLED               = true,
     OPACITY_MIN                   = 0.15,
     OPACITY_FULL_HP_TRANSPARENCY  = 0.9,
@@ -161,7 +144,6 @@ local DEFAULTS = {
 
     DEBUG_HEALTH = false,
 
-    -- ─── Size pulse ────────────────────────────────────────────────────
     PULSE_ENABLED          = true,
     PULSE_DAMAGE_PER_HP    = 0.010,
     PULSE_HEAL_PER_HP      = 0.006,
@@ -171,7 +153,6 @@ local DEFAULTS = {
     PULSE_HEAL_IN_DURATION = 0.35,
     PULSE_HEAL_OUT_DURATION = 0.70,
 
-    -- ─── Circular mode ─────────────────────────────────────────────────
     CIRCULAR_ENABLED      = true,
     CIRCULAR_RADIUS       = 40,
     CIRCULAR_SEGMENTS     = 12,
@@ -183,9 +164,62 @@ local DEFAULTS = {
     CIRCULAR_UNFILLED_COLOR = Color3.fromRGB(40, 40, 40),
     CIRCULAR_UNFILLED_TRANSPARENCY = 0.4,
 
-    -- ─── Lifecycle ─────────────────────────────────────────────────────
+    -- ─── Shared name formatting ────────────────────────────────────────
+    NAME_MODE                 = "DisplayName",
+    NAME_TRUNCATE_USERNAME    = 8,
+    NAME_TRUNCATE_DISPLAYNAME = 8,
+
+    -- ─── View list ─────────────────────────────────────────────────────
+    VIEWLIST_ENABLED         = true,
+    VIEWLIST_WIDTH_MULT      = 1.25,
+    VIEWLIST_STACK_GAP       = 6,
+    VIEWLIST_OFFSET_X        = 0,
+    VIEWLIST_OFFSET_Y        = 0,
+    VIEWLIST_MAX_ROWS        = 8,
+    VIEWLIST_ROW_HEIGHT      = 16,
+
+    -- Which categories of player to include
+    VIEWLIST_INCLUDE_SIGHT   = true,
+    VIEWLIST_INCLUDE_LOOK    = true,
+    VIEWLIST_INCLUDE_IDLE    = false,
+    VIEWLIST_IDLE_MAX_DISTANCE = 100,
+
+    -- Sort modes:
+    --   "Priority" — threat (look>sight>idle), then distance, then name
+    --   "Threat"   — threat, then sight vis fraction, then name
+    --   "Distance" — distance only
+    --   "Alpha"    — name only
+    --   "Team"     — team, then name
+    VIEWLIST_SORT            = "Priority",
+
+    VIEWLIST_COLOR_MODE      = "Team",   -- "Team" | "Healthbar" | "Fixed"
+    VIEWLIST_FIXED_COLOR     = Color3.fromRGB(255, 255, 255),
+    VIEWLIST_SIGHT_THRESHOLD = 0.1,
+
+    VIEWLIST_SIZE_SIGHT      = 11,
+    VIEWLIST_SIZE_LOOK       = 13,
+    VIEWLIST_SIZE_IDLE       = 10,
+    VIEWLIST_BOLD_ON_LOOK    = true,
+
+    -- Alpha tiers: idle → sight → look
+    VIEWLIST_ALPHA_BASE      = 0.65,
+    VIEWLIST_ALPHA_SIGHT     = 0.30,
+    VIEWLIST_ALPHA_LOOK      = 0.00,
+
+    -- ─── Proximity color override ──────────────────────────────────────
+    -- When an entry is closer than PROXIMITY_DISTANCE studs, its color
+    -- is forced to a lerp between NEAR (at 0 studs) and FAR (at the
+    -- threshold), regardless of the color mode above.
+    VIEWLIST_PROXIMITY_ENABLED    = true,
+    VIEWLIST_PROXIMITY_DISTANCE   = 100,
+    VIEWLIST_PROXIMITY_NEAR_COLOR = Color3.fromRGB(255, 30, 30),    -- red, at 0 studs
+    VIEWLIST_PROXIMITY_FAR_COLOR  = Color3.fromRGB(255, 165, 0),    -- orange, at threshold
+
+    VIEWLIST_EMPTY_TEXT  = "",
+    VIEWLIST_EMPTY_COLOR = Color3.fromRGB(150, 150, 150),
+
     KILL_KEYBIND    = Enum.KeyCode.K,
-    UPDATE_INTERVAL = 0,   -- 0 = every RenderStepped
+    UPDATE_INTERVAL = 0,
 }
 
 --------------------------------------------------------------------------------
@@ -194,7 +228,6 @@ local DEFAULTS = {
 local SelfHealthbar = {}
 SelfHealthbar.__index = SelfHealthbar
 
--- Font bold map (only pairs where both Enum.Font members exist)
 local FONT_BOLD_MAP = {
     [Enum.Font.Gotham]              = Enum.Font.GothamBold,
     [Enum.Font.GothamMedium]        = Enum.Font.GothamBold,
@@ -213,6 +246,12 @@ local function resolveFont(baseFont, bold)
     return FONT_BOLD_MAP[baseFont] or Enum.Font.GothamBold
 end
 
+local function truncateName(s, maxLen)
+    if not maxLen or maxLen <= 0 then return s end
+    if #s <= maxLen then return s end
+    return s:sub(1, maxLen) .. ".."
+end
+
 function SelfHealthbar.new(overrides)
     local self = setmetatable({}, SelfHealthbar)
     self.config = {}
@@ -221,24 +260,26 @@ function SelfHealthbar.new(overrides)
         for k, v in pairs(overrides) do self.config[k] = v end
     end
 
-    -- Runtime state
-    self._humanoid      = nil
-    self._character     = nil
-    self._charConn      = nil
-    self._lastHealth    = nil
+    self._humanoid       = nil
+    self._character      = nil
+    self._charConn       = nil
+    self._lastHealth     = nil
     self._lastChangeTime = 0
     self._lastFullHPTime = nil
-    self._recentChanges = {}
-    self._currentAlpha  = 0.15
-    self._barWidthPx    = 180
-    self._barHeightPx   = 11
-    self._hudSize       = UDim2.fromOffset(380, 151)
-    self._shakeActive   = false
-    self._ringSegments  = {}
-    self._lastUpdate    = 0
+    self._recentChanges  = {}
+    self._currentAlpha   = 0.15
+    self._barWidthPx     = 180
+    self._barHeightPx    = 11
+    self._hudSize        = UDim2.fromOffset(380, 151)
+    self._shakeActive    = false
+    self._ringSegments   = {}
+    self._viewListRows   = {}
+    self._lastUpdate     = 0
+    self._lastDt         = 1 / 60
+    self._lastTick       = os.clock()
 
-    self._connections   = {}
-    self._running       = false
+    self._connections = {}
+    self._running     = false
 
     self:_buildUI()
     self:_recomputeBaseSize()
@@ -246,19 +287,25 @@ function SelfHealthbar.new(overrides)
     return self
 end
 
---------------------------------------------------------------------------------
--- INTERNALS: connection tracking
---------------------------------------------------------------------------------
 function SelfHealthbar:_track(conn)
     self._connections[#self._connections + 1] = conn
     return conn
 end
 
 --------------------------------------------------------------------------------
--- INTERNALS: color resolution
+-- COLOR HELPERS
 --------------------------------------------------------------------------------
-function SelfHealthbar:_getTeamColor()
+function SelfHealthbar:_getLocalTeamColor()
     local team = LocalPlayer.Team
+    if team and team.TeamColor and team.TeamColor ~= BrickColor.new("Neutral") then
+        return team.TeamColor.Color
+    end
+    return nil
+end
+
+function SelfHealthbar:_getPlayerTeamColor(player)
+    if not player then return nil end
+    local team = player.Team
     if team and team.TeamColor and team.TeamColor ~= BrickColor.new("Neutral") then
         return team.TeamColor.Color
     end
@@ -276,7 +323,7 @@ function SelfHealthbar:_resolveFillColor(pct)
         return cfg.LOWHP_FILL_BOTTOM:Lerp(cfg.LOWHP_FILL_TOP, t)
     end
     if cfg.USE_TEAM_COLOR_FILL then
-        local tc = self:_getTeamColor()
+        local tc = self:_getLocalTeamColor()
         if tc then return tc end
     end
     if cfg.BAR_FILL_COLOR_AUTO then return self:_autoFillColor(pct) end
@@ -290,7 +337,7 @@ function SelfHealthbar:_resolveBorderColor(pct, fillColor)
         return cfg.LOWHP_BORDER_BOTTOM:Lerp(cfg.LOWHP_BORDER_TOP, t)
     end
     if cfg.USE_TEAM_COLOR_BORDER then
-        local tc = self:_getTeamColor()
+        local tc = self:_getLocalTeamColor()
         if tc then return tc end
     end
     if cfg.BAR_BORDER_AUTO then
@@ -303,6 +350,26 @@ function SelfHealthbar:_resolveBorderColor(pct, fillColor)
     return cfg.BAR_BORDER_COLOR
 end
 
+--------------------------------------------------------------------------------
+-- NAME FORMATTING
+--------------------------------------------------------------------------------
+function SelfHealthbar:_formatPlayerName(player)
+    local cfg = self.config
+    local mode = cfg.NAME_MODE or "DisplayName"
+    local un = truncateName(player.Name,        cfg.NAME_TRUNCATE_USERNAME or 0)
+    local dn = truncateName(player.DisplayName, cfg.NAME_TRUNCATE_DISPLAYNAME or 0)
+    if mode == "Username" then
+        return un
+    elseif mode == "Both" then
+        return un .. " (" .. dn .. ")"
+    else
+        return dn
+    end
+end
+
+--------------------------------------------------------------------------------
+-- TEXT FORMAT / ANCHORS
+--------------------------------------------------------------------------------
 function SelfHealthbar:_formatText(hp, maxHp, pct)
     local f = self.config.TEXT_FORMAT
     local hpI = math.floor(hp)
@@ -387,7 +454,6 @@ function SelfHealthbar:_buildUI()
         c.Parent = bar
     end
 
-    -- HP text
     local textLabel = Instance.new("TextLabel")
     textLabel.Name                   = "Text"
     textLabel.BackgroundTransparency = 1
@@ -419,7 +485,6 @@ function SelfHealthbar:_buildUI()
         self._textUIStroke = s
     end
 
-    -- DPS label
     local dpsLabel = Instance.new("TextLabel")
     dpsLabel.Name                   = "DPS"
     dpsLabel.BackgroundTransparency = 1
@@ -438,7 +503,6 @@ function SelfHealthbar:_buildUI()
     dpsLabel.Parent                 = hud
     self._dpsLabel = dpsLabel
 
-    -- Circular ring container
     local circular = Instance.new("Frame")
     circular.Name                   = "Circular"
     circular.BackgroundTransparency = 1
@@ -450,22 +514,47 @@ function SelfHealthbar:_buildUI()
     self._circular = circular
 
     self:_rebuildCircular()
+
+    local viewListContainer = Instance.new("Frame")
+    viewListContainer.Name                   = "ViewList"
+    viewListContainer.BackgroundTransparency = 1
+    viewListContainer.AnchorPoint            = Vector2.new(0.5, 0)
+    viewListContainer.Position               = UDim2.new(0.5, 0, 0.5, 0)
+    viewListContainer.Size                   = UDim2.fromOffset(100, 0)
+    viewListContainer.Visible                = false
+    viewListContainer.Parent                 = hud
+    self._viewListContainer = viewListContainer
+
+    local emptyLabel = Instance.new("TextLabel")
+    emptyLabel.Name                   = "EmptyState"
+    emptyLabel.BackgroundTransparency = 1
+    emptyLabel.AnchorPoint            = Vector2.new(0.5, 0)
+    emptyLabel.Position               = UDim2.new(0.5, 0, 0, 0)
+    emptyLabel.Size                   = UDim2.new(1, 0, 0, cfg.VIEWLIST_ROW_HEIGHT)
+    emptyLabel.Font                   = Enum.Font.Gotham
+    emptyLabel.TextScaled             = false
+    emptyLabel.TextSize               = cfg.VIEWLIST_SIZE_SIGHT
+    emptyLabel.TextColor3             = cfg.VIEWLIST_EMPTY_COLOR
+    emptyLabel.TextStrokeTransparency = 0.6
+    emptyLabel.TextStrokeColor3       = Color3.fromRGB(0, 0, 0)
+    emptyLabel.Text                   = ""
+    emptyLabel.Visible                = false
+    emptyLabel.Parent                 = viewListContainer
+    self._viewListEmpty = emptyLabel
 end
 
 function SelfHealthbar:_rebuildCircular()
-    -- Tear down existing segments
     for _, seg in ipairs(self._ringSegments) do
         if seg and seg.Parent then seg:Destroy() end
     end
     self._ringSegments = {}
 
     local cfg = self.config
-    if cfg.CIRCULAR_ENABLED then
-        self._bar.Visible = false
-    else
+    if not cfg.CIRCULAR_ENABLED then
         self._bar.Visible = true
         return
     end
+    self._bar.Visible = false
 
     local N = cfg.CIRCULAR_SEGMENTS
     local R = cfg.CIRCULAR_RADIUS
@@ -503,9 +592,39 @@ function SelfHealthbar:_rebuildCircular()
     end
 end
 
+function SelfHealthbar:_ensureViewListRow(n)
+    while #self._viewListRows < n do
+        local row = Instance.new("TextLabel")
+        row.Name                   = "ViewRow_" .. (#self._viewListRows + 1)
+        row.BackgroundTransparency = 1
+        row.AnchorPoint            = Vector2.new(0.5, 0)
+        row.Position               = UDim2.new(0.5, 0, 0, #self._viewListRows * self.config.VIEWLIST_ROW_HEIGHT)
+        row.Size                   = UDim2.new(1, 0, 0, self.config.VIEWLIST_ROW_HEIGHT)
+        row.Font                   = Enum.Font.Gotham
+        row.TextScaled             = false
+        row.TextSize               = self.config.VIEWLIST_SIZE_SIGHT
+        row.TextColor3             = Color3.new(1, 1, 1)
+        row.TextStrokeTransparency = 0.6
+        row.TextStrokeColor3       = Color3.fromRGB(0, 0, 0)
+        row.Text                   = ""
+        row.Visible                = false
+        row.Parent                 = self._viewListContainer
+        self._viewListRows[#self._viewListRows + 1] = row
+    end
+end
+
 --------------------------------------------------------------------------------
 -- LAYOUT
 --------------------------------------------------------------------------------
+function SelfHealthbar:_healthbarWidthPx()
+    local cfg = self.config
+    if cfg.CIRCULAR_ENABLED then
+        return cfg.CIRCULAR_RADIUS * 2
+    else
+        return self._barWidthPx
+    end
+end
+
 function SelfHealthbar:_positionText()
     local cfg = self.config
     local halfW, halfH
@@ -521,7 +640,7 @@ function SelfHealthbar:_positionText()
 
     local tl = self._textLabel
     tl.AnchorPoint = Vector2.new(ax, ay)
-    tl.Position = UDim2.new(
+    tl.Position    = UDim2.new(
         0.5, sx + (cfg.TEXT_OFFSET_X or 0),
         0.5, sy + (cfg.TEXT_OFFSET_Y or 0)
     )
@@ -547,7 +666,6 @@ function SelfHealthbar:_positionDps()
         )
         local hpX = sx + (cfg.TEXT_OFFSET_X or 0)
         local hpY = sy + (cfg.TEXT_OFFSET_Y or 0)
-
         local stack = self._textLabel.Size.Y.Offset
 
         local dpsAnchorY, dpsY
@@ -560,7 +678,7 @@ function SelfHealthbar:_positionDps()
         end
 
         dl.AnchorPoint = Vector2.new(0.5, dpsAnchorY)
-        dl.Position = UDim2.new(
+        dl.Position    = UDim2.new(
             0.5, hpX + (cfg.DPS_OFFSET_X or 0),
             0.5, dpsY + (cfg.DPS_OFFSET_Y or 0)
         )
@@ -569,7 +687,7 @@ function SelfHealthbar:_positionDps()
             cfg.DPS_POSITION, halfW, halfH, cfg.DPS_POSITION_GAP
         )
         dl.AnchorPoint = Vector2.new(ax, ay)
-        dl.Position = UDim2.new(
+        dl.Position    = UDim2.new(
             0.5, sx + (cfg.DPS_OFFSET_X or 0),
             0.5, sy + (cfg.DPS_OFFSET_Y or 0)
         )
@@ -578,6 +696,96 @@ function SelfHealthbar:_positionDps()
     dl.Font        = resolveFont(cfg.DPS_FONT, cfg.DPS_BOLD)
     dl.TextWrapped = cfg.DPS_WRAPPED
     dl.Size        = UDim2.fromOffset(cfg.DPS_LABEL_WIDTH, dl.Size.Y.Offset)
+end
+
+function SelfHealthbar:_getLowestElementBottom()
+    local cfg = self.config
+    local halfW, halfH
+    if cfg.CIRCULAR_ENABLED then
+        halfW, halfH = cfg.CIRCULAR_RADIUS, cfg.CIRCULAR_RADIUS
+    else
+        halfW, halfH = self._barWidthPx / 2, self._barHeightPx / 2
+    end
+
+    local lowest = halfH
+
+    if cfg.TEXT_ENABLED then
+        local _, hpAnchorY, _, hpY = self:_resolveAnchor(
+            cfg.TEXT_POSITION, halfW, halfH, cfg.TEXT_POSITION_GAP
+        )
+        hpY = hpY + (cfg.TEXT_OFFSET_Y or 0)
+        local hpHeight = self._textLabel.Size.Y.Offset
+
+        local hpBottom
+        if hpAnchorY == 1 then
+            hpBottom = hpY
+        elseif hpAnchorY == 0 then
+            hpBottom = hpY + hpHeight
+        else
+            hpBottom = hpY + hpHeight / 2
+        end
+        if hpBottom > lowest then lowest = hpBottom end
+    end
+
+    if cfg.DPS_ENABLED then
+        local dpsHeight = self._dpsLabel.Size.Y.Offset
+        local dpsBottom
+
+        if cfg.DPS_FOLLOW_TEXT and cfg.TEXT_ENABLED then
+            local _, _, _, hpY = self:_resolveAnchor(
+                cfg.TEXT_POSITION, halfW, halfH, cfg.TEXT_POSITION_GAP
+            )
+            hpY = hpY + (cfg.TEXT_OFFSET_Y or 0)
+            local stack = self._textLabel.Size.Y.Offset
+            local dy = cfg.DPS_OFFSET_Y or 0
+
+            if cfg.TEXT_POSITION == "Above" then
+                dpsBottom = hpY - stack + dy
+            else
+                dpsBottom = hpY + stack + dpsHeight + dy
+            end
+        else
+            local _, dpsAnchorY, _, dpsY = self:_resolveAnchor(
+                cfg.DPS_POSITION, halfW, halfH, cfg.DPS_POSITION_GAP
+            )
+            dpsY = dpsY + (cfg.DPS_OFFSET_Y or 0)
+
+            if dpsAnchorY == 1 then
+                dpsBottom = dpsY
+            elseif dpsAnchorY == 0 then
+                dpsBottom = dpsY + dpsHeight
+            else
+                dpsBottom = dpsY + dpsHeight / 2
+            end
+        end
+        if dpsBottom > lowest then lowest = dpsBottom end
+    end
+
+    return lowest
+end
+
+function SelfHealthbar:_positionViewList()
+    local cfg = self.config
+    if not cfg.VIEWLIST_ENABLED then return end
+
+    local lowestBottom = self:_getLowestElementBottom()
+    local vlTop = lowestBottom + cfg.VIEWLIST_STACK_GAP + (cfg.VIEWLIST_OFFSET_Y or 0)
+
+    local vlWidth = self:_healthbarWidthPx() * cfg.VIEWLIST_WIDTH_MULT
+    local rowCount = math.max(1, #self._viewListRows)
+
+    self._viewListContainer.Position = UDim2.new(
+        0.5, cfg.VIEWLIST_OFFSET_X or 0,
+        0.5, vlTop
+    )
+    self._viewListContainer.Size = UDim2.fromOffset(
+        vlWidth,
+        rowCount * cfg.VIEWLIST_ROW_HEIGHT
+    )
+
+    for i, row in ipairs(self._viewListRows) do
+        row.Position = UDim2.new(0.5, 0, 0, (i - 1) * cfg.VIEWLIST_ROW_HEIGHT)
+    end
 end
 
 function SelfHealthbar:_recomputeBaseSize()
@@ -606,10 +814,11 @@ function SelfHealthbar:_recomputeBaseSize()
 
     self:_positionText()
     self:_positionDps()
+    self:_positionViewList()
 end
 
 --------------------------------------------------------------------------------
--- FEEDBACK (popups, shake, pulse)
+-- FEEDBACK
 --------------------------------------------------------------------------------
 function SelfHealthbar:_spawnIndicator(delta)
     local cfg = self.config
@@ -784,7 +993,6 @@ function SelfHealthbar:_onHealthChanged(newHP, maxHP)
 end
 
 function SelfHealthbar:_hookCharacter(char)
-    -- Disconnect the previous character's HealthChanged, if any
     if self._charConn then
         pcall(function() self._charConn:Disconnect() end)
         self._charConn = nil
@@ -799,9 +1007,9 @@ function SelfHealthbar:_hookCharacter(char)
         return
     end
 
-    self._humanoid      = hum
-    self._lastHealth    = hum.Health
-    self._recentChanges = {}
+    self._humanoid       = hum
+    self._lastHealth     = hum.Health
+    self._recentChanges  = {}
     self._lastChangeTime = os.clock()
     self._lastFullHPTime = nil
 
@@ -846,7 +1054,6 @@ function SelfHealthbar:_computeRate(now)
         return sum
     end
 
-    -- "Average"
     local sum = 0
     for _, e in ipairs(self._recentChanges) do
         if now - e.t <= cfg.DPS_WINDOW then sum = sum + e.delta end
@@ -855,22 +1062,201 @@ function SelfHealthbar:_computeRate(now)
 end
 
 --------------------------------------------------------------------------------
+-- VIEW LIST
+--------------------------------------------------------------------------------
+function SelfHealthbar:_updateViewList(currentPct)
+    local cfg = self.config
+    if not cfg.VIEWLIST_ENABLED then
+        self._viewListContainer.Visible = false
+        return
+    end
+
+    local bus = getgenv().ModuleBus
+    if not bus or not bus.ViewLines or not bus.ViewLines.Active then
+        self._viewListContainer.Visible = false
+        return
+    end
+
+    -- My position for distance calc
+    local myChar = LocalPlayer.Character
+    local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+
+    -- Build entry list
+    local entries = {}
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            local hit = bus.ViewLines.Hit[player] == true
+            local vis = bus.ViewLines.Visibility[player] or 0
+            local sightSeen = vis >= (cfg.VIEWLIST_SIGHT_THRESHOLD or 0.1)
+
+            -- Distance (math.huge when either side lacks a root)
+            local dist = math.huge
+            local theirChar = player.Character
+            local theirRoot = theirChar and theirChar:FindFirstChild("HumanoidRootPart")
+            if myRoot and theirRoot then
+                dist = (myRoot.Position - theirRoot.Position).Magnitude
+            end
+
+            -- Threat tier: 2=look, 1=sight, 0=idle
+            local threat = 0
+            if hit then threat = 2
+            elseif sightSeen then threat = 1 end
+
+            -- Inclusion
+            local include = false
+            if hit and cfg.VIEWLIST_INCLUDE_LOOK then
+                include = true
+            elseif sightSeen and not hit and cfg.VIEWLIST_INCLUDE_SIGHT then
+                include = true
+            elseif cfg.VIEWLIST_INCLUDE_IDLE
+                and dist <= (cfg.VIEWLIST_IDLE_MAX_DISTANCE or 100)
+            then
+                include = true
+            end
+
+            if include then
+                entries[#entries + 1] = {
+                    player    = player,
+                    hit       = hit,
+                    sightSeen = sightSeen,
+                    vis       = vis,
+                    threat    = threat,
+                    distance  = dist,
+                }
+            end
+        end
+    end
+
+    -- Sort
+    local sortMode = cfg.VIEWLIST_SORT or "Priority"
+    if sortMode == "Priority" then
+        table.sort(entries, function(a, b)
+            if a.threat ~= b.threat then return a.threat > b.threat end
+            if a.distance ~= b.distance then return a.distance < b.distance end
+            return a.player.Name:lower() < b.player.Name:lower()
+        end)
+    elseif sortMode == "Threat" then
+        table.sort(entries, function(a, b)
+            if a.hit ~= b.hit then return a.hit end
+            if a.vis ~= b.vis then return a.vis > b.vis end
+            return a.player.Name:lower() < b.player.Name:lower()
+        end)
+    elseif sortMode == "Distance" then
+        table.sort(entries, function(a, b)
+            return a.distance < b.distance
+        end)
+    elseif sortMode == "Alpha" then
+        table.sort(entries, function(a, b)
+            return a.player.Name:lower() < b.player.Name:lower()
+        end)
+    elseif sortMode == "Team" then
+        table.sort(entries, function(a, b)
+            local ta = a.player.Team and a.player.Team.Name or ""
+            local tb = b.player.Team and b.player.Team.Name or ""
+            if ta ~= tb then return ta < tb end
+            return a.player.Name:lower() < b.player.Name:lower()
+        end)
+    end
+
+    -- Cap
+    while #entries > cfg.VIEWLIST_MAX_ROWS do
+        table.remove(entries)
+    end
+
+    -- Empty state
+    if #entries == 0 then
+        if cfg.VIEWLIST_EMPTY_TEXT == "" then
+            self._viewListContainer.Visible = false
+        else
+            self._viewListContainer.Visible = true
+            self._viewListEmpty.Visible = true
+            self._viewListEmpty.Text      = cfg.VIEWLIST_EMPTY_TEXT
+            self._viewListEmpty.TextColor3 = cfg.VIEWLIST_EMPTY_COLOR
+            self._viewListEmpty.TextSize   = cfg.VIEWLIST_SIZE_SIGHT
+            for _, row in ipairs(self._viewListRows) do row.Visible = false end
+            self:_positionViewList()
+        end
+        return
+    end
+
+    self._viewListContainer.Visible = true
+    self._viewListEmpty.Visible = false
+
+    self:_ensureViewListRow(#entries)
+
+    for i, entry in ipairs(entries) do
+        local row = self._viewListRows[i]
+        row.Visible = true
+        row.Text    = self:_formatPlayerName(entry.player)
+
+        -- ─── Size / font / transparency by threat tier ─────────────
+        if entry.hit then
+            row.TextSize         = cfg.VIEWLIST_SIZE_LOOK
+            row.Font             = cfg.VIEWLIST_BOLD_ON_LOOK
+                                    and resolveFont(Enum.Font.Gotham, true)
+                                    or  Enum.Font.Gotham
+            row.TextTransparency = cfg.VIEWLIST_ALPHA_LOOK
+        elseif entry.sightSeen then
+            row.TextSize         = cfg.VIEWLIST_SIZE_SIGHT
+            row.Font             = Enum.Font.Gotham
+            row.TextTransparency = cfg.VIEWLIST_ALPHA_SIGHT
+        else -- idle
+            row.TextSize         = cfg.VIEWLIST_SIZE_IDLE
+            row.Font             = Enum.Font.Gotham
+            row.TextTransparency = cfg.VIEWLIST_ALPHA_BASE
+        end
+
+        -- ─── Color mode ────────────────────────────────────────────
+        local color
+        if cfg.VIEWLIST_COLOR_MODE == "Fixed" then
+            color = cfg.VIEWLIST_FIXED_COLOR
+        elseif cfg.VIEWLIST_COLOR_MODE == "Healthbar" then
+            color = self:_resolveFillColor(currentPct)
+        else -- "Team"
+            color = self:_getPlayerTeamColor(entry.player)
+                or Color3.fromRGB(255, 255, 255)
+        end
+
+        -- ─── Proximity override (fires regardless of mode) ─────────
+        if cfg.VIEWLIST_PROXIMITY_ENABLED
+            and entry.distance < (cfg.VIEWLIST_PROXIMITY_DISTANCE or 100)
+        then
+            -- t = 0 at 0 studs (red), t = 1 at threshold (orange)
+            local t = clamp(entry.distance / cfg.VIEWLIST_PROXIMITY_DISTANCE, 0, 1)
+            color = cfg.VIEWLIST_PROXIMITY_NEAR_COLOR:Lerp(
+                cfg.VIEWLIST_PROXIMITY_FAR_COLOR, t
+            )
+        end
+
+        row.TextColor3 = color
+    end
+
+    -- Hide unused rows
+    for i = #entries + 1, #self._viewListRows do
+        self._viewListRows[i].Visible = false
+    end
+
+    self:_positionViewList()
+end
+
+--------------------------------------------------------------------------------
 -- PUBLIC: update
 --------------------------------------------------------------------------------
 function SelfHealthbar:update()
     local now = os.clock()
     local hum = self._humanoid
+    local cfg = self.config
+
     if not hum or hum.Health <= 0 then
         self._hud.GroupTransparency = 1
         return
     end
 
-    local cfg = self.config
     local hp    = hum.Health
     local maxHP = math.max(hum.MaxHealth, 1)
     local pct   = clamp(hp / maxHP, 0, 1)
 
-    -- ─── Progression ─────────────────────────────────────────────────
+    -- Progression
     local mode = cfg.PROGRESSION
     if mode == "Both" then
         self._bar.AnchorPoint = Vector2.new(0.5, 0.5)
@@ -883,7 +1269,7 @@ function SelfHealthbar:update()
         self._bar.Position    = UDim2.new(0.5, self._barWidthPx / 2, 0.5, 0)
     end
 
-    -- ─── Fill / ring ─────────────────────────────────────────────────
+    -- Fill / ring
     if cfg.CIRCULAR_ENABLED then
         local N = cfg.CIRCULAR_SEGMENTS
         local litCount = math.floor(N * pct + 0.5)
@@ -904,7 +1290,7 @@ function SelfHealthbar:update()
         self._stroke.Color         = self:_resolveBorderColor(pct, fillColor)
     end
 
-    -- ─── Text ────────────────────────────────────────────────────────
+    -- HP text
     if cfg.TEXT_ENABLED then
         local tl = self._textLabel
         tl.Visible = true
@@ -923,7 +1309,7 @@ function SelfHealthbar:update()
         self._textLabel.Visible = false
     end
 
-    -- ─── DPS/HPS ─────────────────────────────────────────────────────
+    -- DPS/HPS
     if cfg.DPS_ENABLED then
         local rate = self:_computeRate(now)
         local rounded = math.floor(math.abs(rate) * 10 + 0.5) / 10
@@ -943,7 +1329,10 @@ function SelfHealthbar:update()
         self._dpsLabel.Visible = false
     end
 
-    -- ─── Dynamic opacity ─────────────────────────────────────────────
+    -- View list
+    self:_updateViewList(pct)
+
+    -- Dynamic opacity
     if cfg.ALWAYS_VISIBLE then
         self._hud.GroupTransparency = cfg.ALWAYS_VISIBLE_ALPHA
     elseif cfg.OPACITY_ENABLED then
@@ -970,7 +1359,6 @@ function SelfHealthbar:update()
             end
         end
 
-        -- dt is approximated by the interval passed to update()
         local dt = self._lastDt or (1 / 60)
         local rate = (targetAlpha < self._currentAlpha)
             and cfg.OPACITY_FADE_IN_RATE
@@ -983,10 +1371,9 @@ function SelfHealthbar:update()
     end
 end
 
--- Internal wrapper that computes dt before calling update()
 function SelfHealthbar:_tick()
     local now = os.clock()
-    self._lastDt = now - (self._lastTick or now)
+    self._lastDt   = now - (self._lastTick or now)
     self._lastTick = now
 
     local cfg = self.config
@@ -1006,7 +1393,6 @@ function SelfHealthbar:start()
     self._running = true
     self._lastTick = os.clock()
 
-    -- Cursor tracking
     self:_track(UserInputService.InputChanged:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseMovement then
             if not self.config.FOLLOW_CURSOR then return end
@@ -1017,14 +1403,12 @@ function SelfHealthbar:start()
         end
     end))
 
-    -- Initial cursor placement
     local m = UserInputService:GetMouseLocation()
     self._root.Position = UDim2.new(
         0, m.X + self.config.CURSOR_OFFSET_X,
         0, m.Y + self.config.CURSOR_OFFSET_Y
     )
 
-    -- Character lifecycle
     if LocalPlayer.Character then
         self:_hookCharacter(LocalPlayer.Character)
     end
@@ -1032,18 +1416,15 @@ function SelfHealthbar:start()
         self:_hookCharacter(char)
     end))
 
-    -- Viewport changes
     self:_track(workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
         self:_recomputeBaseSize()
     end))
 
-    -- Update loop
     self:_track(RunService.RenderStepped:Connect(function()
         if not self._running then return end
         self:_tick()
     end))
 
-    -- Kill keybind (optional)
     if self.config.KILL_KEYBIND then
         self:_track(UserInputService.InputBegan:Connect(function(input, gp)
             if gp then return end
@@ -1101,7 +1482,6 @@ function SelfHealthbar:setConfig(partial)
         self:_rebuildCircular()
     end
 
-    -- Reflow layout with any new dimensions
     self:_recomputeBaseSize()
 end
 
