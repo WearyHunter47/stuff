@@ -365,6 +365,44 @@ local function eyeOf(head)
     return head.Position + look * (head.Size.Z * 0.5), look
 end
 
+-- Blend a beam's base transparency toward BEAM_OCCLUDE_MIN_ALPHA when the
+-- camera looks directly at the beam's midpoint or at either endpoint.
+local function applyBeamOcclusion(cfg, worldA, worldB, baseAlpha)
+    if not cfg.BEAM_OCCLUDE_ENABLED then return baseAlpha end
+
+    local cam = workspace.CurrentCamera
+    if not cam then return baseAlpha end
+
+    local camPos  = cam.CFrame.Position
+    local camLook = cam.CFrame.LookVector
+
+    local facing = 0
+
+    if worldA then
+        local toA = worldA - camPos
+        local dA  = toA.Magnitude
+        if dA > 1e-3 then
+            facing = math.max(facing, camLook:Dot(toA / dA))
+        end
+    end
+
+    if worldA and worldB then
+        local mid   = (worldA + worldB) * 0.5
+        local toMid = mid - camPos
+        local dM    = toMid.Magnitude
+        if dM > 1e-3 then
+            facing = math.max(facing, camLook:Dot(toMid / dM))
+        end
+    end
+
+    local thresh = cfg.BEAM_OCCLUDE_THRESHOLD or 0.85
+    if facing <= thresh then return baseAlpha end
+
+    local factor = (facing - thresh) / math.max(1 - thresh, 1e-3)
+    local minA   = cfg.BEAM_OCCLUDE_MIN_ALPHA or 0.9
+    return math.clamp(baseAlpha + (minA - baseAlpha) * factor, 0, 1)
+end
+
 function ViewLines.new(overrides)
     local self = setmetatable({}, ViewLines)
     self.config = {}
@@ -689,6 +727,10 @@ function ViewLines:_applySightAppearance(beam, vis)
             + (cfg.SIGHT_ALPHA_VIEWED - cfg.SIGHT_ALPHA_UNVIEWED) * vis
     end
 
+    local a0 = beam.Attachment0 and beam.Attachment0.WorldPosition
+    local a1 = beam.Attachment1 and beam.Attachment1.WorldPosition
+    transparency = applyBeamOcclusion(cfg, a0, a1, transparency)
+
     beam.Color        = ColorSequence.new(color)
     beam.Transparency = NumberSequence.new(transparency)
     beam.Width0       = width
@@ -710,8 +752,31 @@ function ViewLines:_applyLookAppearance(entry, hit, length)
         NumberSequenceKeypoint.new(1, tipT),
     })
 
+    -- Beam occlusion for both the beam and the sniper dot
+    local a0 = entry.lookAttFace and entry.lookAttFace.WorldPosition
+    local a1 = entry.lookAttTip  and entry.lookAttTip.WorldPosition
+
+    if entry.lookBeam then
+        local baseT = cfg.LOOK_TRANSPARENCY_NEAR
+        -- For the beam we only occlude the near-end value; the tip gradient
+        -- is intentionally unaffected so the fade-vs-distance still reads.
+        -- Re-derive the near endpoint transparency by peeking at the current
+        -- NumberSequence, then occlude just that keypoint.
+        local currentSeq = entry.lookBeam.Transparency
+        local nearT = currentSeq.Keypoints[1].Value
+        local farT  = currentSeq.Keypoints[2].Value
+        local occludedNear = applyBeamOcclusion(cfg, a0, a1, nearT)
+
+        entry.lookBeam.Transparency = NumberSequence.new({
+            NumberSequenceKeypoint.new(0, occludedNear),
+            NumberSequenceKeypoint.new(1, farT),
+        })
+    end
+
     if entry.dotPart and entry.dotPart.Parent then
         entry.dotPart.Color = color
+        local baseDot = cfg.LOOK_DOT_ALPHA
+        entry.dotPart.Transparency = applyBeamOcclusion(cfg, a0, a1, baseDot)
     end
 end
 
