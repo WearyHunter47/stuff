@@ -1,1441 +1,1147 @@
 --[[
-    Self Healthbar — module
-    Cursor-anchored HP HUD with damage popups, DPS/HPS tracking, dynamic
-    opacity, size pulse, progression modes, circular mode, and a live
-    "view list" showing who can see or is aiming at you.
+    ESP Module — ViewLines-aware, Figma-styled healthbar
 
-    View list priorities:
-      • Threat tier (look > sight > idle) is the primary sort key
-      • Distance is the secondary sort key (closer = higher)
-      • Base alpha 0.65, sight 0.3, look 0.0
-      • Colors: white default, team option, proximity override (orange→red)
+    Healthbar styles:
+      "Simple"  — BG + Fill + Number (original)
+      "Figma"   — full Figma design: outline, corners, track, fill,
+                  midline, dividers with extension, number
 
-    No side effects on require. No auto-start, no print, no global.
+    Figma elements are scaled from HB_LENGTH using DESIGN_WIDTH = 204.
+    Sub-element sizes clamp to a 1px minimum to prevent disappearing at
+    small scales. Bar thickness is HB_THICKNESS independent of scale.
+
+    Vertical positions (Left/Right) rotate the whole bar 90° and
+    counter-rotate the number so it stays readable.
+
+    Usage:
+        local ESP = loadstring(game:HttpGet(URL))()
+        local esp = ESP.new({ ... })
+        esp:start()
 ]]
 
 local Players          = game:GetService("Players")
 local RunService       = game:GetService("RunService")
-local TweenService     = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
+local CoreGui          = game:GetService("CoreGui")
 
 local LocalPlayer = Players.LocalPlayer
+local Camera      = workspace.CurrentCamera
 
 --------------------------------------------------------------------------------
 -- DEFAULTS
 --------------------------------------------------------------------------------
 local DEFAULTS = {
-    CURSOR_OFFSET_X = 0,
-    CURSOR_OFFSET_Y = 60,
-    FOLLOW_CURSOR   = true,
+    ESPEnabled          = true,
+    ESPShowText         = true,
+    ESPTextSize         = 13,
+    ESPMaxDistance      = 500,
+    ESPUseDistanceLimit = true,
+    ESPUseTeamColor     = true,
+    ESPFriendColor      = true,
 
-    BAR_WIDTH_SCALE  = 0.10,
-    BAR_WIDTH_PX     = nil,
-    BAR_HEIGHT_SCALE = 0.01,
-    BAR_HEIGHT_PX    = 8,
+    ESPWhitelist = {},
+    ESPBlacklist = {},
 
-    PAD_X       = 100,
-    PAD_TOP     = 80,
-    PAD_BOTTOM  = 60,
+    ESP_NAME_FORMAT = "Vertical",
+    ESP_NAME_WIDTH  = 150,
 
-    BAR_FILL_COLOR_AUTO = true,
-    BAR_FILL_COLOR      = Color3.fromRGB(0, 255, 0),
-    BAR_FILL_TRANSPARENCY = 0.5,
+    ESP_ANCHOR_PART  = "HumanoidRootPart",
+    ESP_STUDS_OFFSET = Vector3.new(0, 2, 0),
 
-    BAR_BORDER_AUTO      = true,
-    BAR_BORDER_COLOR     = Color3.fromRGB(0, 128, 0),
-    BAR_BORDER_OFFSET    = 0.5,
-    BAR_BORDER_THICKNESS = 2,
-    BAR_BORDER_TRANSPARENCY = 0,
+    NT_OFFSET_X     = 0,
+    NT_OFFSET_Y     = 0,
+    NT_LINE_SPACING = 0,
 
-    BAR_ROUNDED = false,
-    BAR_CORNER_RADIUS = 2,
+    NT_HIDE_HP_IF_BAR_TEXT = true,
 
-    USE_TEAM_COLOR_FILL   = false,
-    USE_TEAM_COLOR_BORDER = false,
+    INTEGRATION_ENABLED = true,
+    SIGHT_THRESHOLD     = 0.1,
 
-    LOWHP_OVERRIDE_ENABLED = true,
-    LOWHP_THRESHOLD        = 0.30,
-    LOWHP_FILL_TOP         = Color3.fromRGB(255, 0, 0),
-    LOWHP_FILL_BOTTOM      = Color3.fromRGB(0, 0, 0),
-    LOWHP_BORDER_TOP       = Color3.fromRGB(128, 0, 0),
-    LOWHP_BORDER_BOTTOM    = Color3.fromRGB(0, 0, 0),
+    HL_BASE_TRANSPARENCY  = 0.7,
+    HL_SIGHT_TRANSPARENCY = 0.4,
+    HL_LOOK_TRANSPARENCY  = 0.1,
 
-    TEXT_ENABLED        = true,
-    TEXT_FORMAT         = "PCT",
-    TEXT_SIZE           = 13,
-    TEXT_COLOR_AUTO     = true,
-    TEXT_COLOR          = Color3.fromRGB(255, 255, 255),
-    TEXT_TRANSPARENCY   = 0.1,
+    NT_ALPHA_BASE  = 0.6,
+    NT_ALPHA_SIGHT = 0.3,
+    NT_ALPHA_LOOK  = 0.0,
 
-    TEXT_FONT         = Enum.Font.Gotham,
-    TEXT_BOLD         = true,
-    TEXT_LABEL_WIDTH  = 220,
-    TEXT_WRAPPED      = false,
+    NT_SIZE_BASE  = 13,
+    NT_SIZE_SIGHT = 16,
+    NT_SIZE_LOOK  = 20,
 
-    TEXT_POSITION     = "Below",
-    TEXT_POSITION_GAP = 4,
-    TEXT_OFFSET_X     = 0,
-    TEXT_OFFSET_Y     = 0,
+    NT_BOLD_ON_LOOK = true,
 
-    TEXT_STROKE_COLOR_AUTO   = false,
-    TEXT_STROKE_COLOR        = Color3.fromRGB(0, 0, 0),
-    TEXT_STROKE_TRANSPARENCY = 0.3,
-    TEXT_STROKE_WIDTH        = 1,
+    CENTER_OVERRIDE_ENABLED = true,
+    CENTER_FALLOFF_DEGREES  = 45,
+    CENTER_MAX_ALPHA        = 0.0,
 
-    PROGRESSION = "Both",
+    SCALE_ENABLED          = true,
+    SCALE_REFERENCE_HEIGHT = 140,
+    SCALE_MIN              = 0.5,
+    SCALE_MAX              = 2.0,
 
-    SHAKE_ENABLED       = true,
-    SHAKE_INTENSITY     = 6,
-    SHAKE_INTENSITY_PER_DMG = 0.3,
-    SHAKE_MAX           = 18,
-    SHAKE_DURATION      = 0.10,
-    SHAKE_STYLE         = Enum.EasingStyle.Quad,
-    SHAKE_DIRECTION     = Enum.EasingDirection.Out,
-    SHAKE_ON_DAMAGE     = true,
-    SHAKE_ON_HEAL       = true,
+    -- ─── Healthbar ────────────────────────────────────────────────────
+    HB_STYLE             = "Figma",   -- "Simple" | "Figma"
+    HB_ENABLED           = true,
+    HB_POSITION          = "Bottom",
+    HB_LENGTH            = 90,
+    HB_THICKNESS         = 10,
+    HB_GAP               = 4,
 
-    INDICATOR_ENABLED        = true,
-    INDICATOR_DURATION       = 1.2,
-    INDICATOR_SIZE           = 14,
-    INDICATOR_DAMAGE_COLOR   = Color3.fromRGB(255, 80, 80),
-    INDICATOR_HEAL_COLOR     = Color3.fromRGB(80, 255, 80),
-    INDICATOR_RISE_HEIGHT    = 40,
-    INDICATOR_FALL_HEIGHT    = 30,
-    INDICATOR_DRIFT_X        = 18,
-    INDICATOR_START_X        = 40,
-    INDICATOR_STROKE_TRANSPARENCY = 0.4,
-    INDICATOR_DAMAGE_SIDE    = -1,
-    INDICATOR_HEAL_SIDE      = 1,
+    HB_BG_COLOR          = Color3.fromRGB(20, 20, 20),
+    HB_FILL_COLOR        = nil,
 
-    DPS_ENABLED      = true,
-    DPS_MODE         = "Weighted",
-    DPS_WINDOW       = 5,
-    DPS_DECAY_TIME   = 3,
-    DPS_THRESHOLD    = 0.5,
-    DPS_MAX_EVENTS   = 64,
-    DPS_SIZE         = 11,
-    DPS_DAMAGE_COLOR = Color3.fromRGB(255, 120, 120),
-    DPS_HEAL_COLOR   = Color3.fromRGB(120, 255, 120),
-    DPS_STROKE_TRANSPARENCY = 0.5,
+    HB_ROUNDED           = true,
+    HB_CORNER_RADIUS     = 3,
 
-    DPS_FONT         = Enum.Font.GothamBold,
-    DPS_BOLD         = false,
-    DPS_LABEL_WIDTH  = 220,
-    DPS_WRAPPED      = false,
+    HB_BORDER            = true,
+    HB_BORDER_COLOR      = Color3.fromRGB(0, 0, 0),
+    HB_BORDER_THICKNESS  = 1,
 
-    DPS_FOLLOW_TEXT  = true,
-    DPS_POSITION     = "Below",
-    DPS_POSITION_GAP = 4,
-    DPS_OFFSET_X     = 0,
-    DPS_OFFSET_Y     = 0,
+    HB_USE_TEAM_COLOR_FILL = false,
+    HB_USE_TEAM_COLOR_TEXT = false,
 
-    OPACITY_ENABLED               = true,
-    OPACITY_MIN                   = 0.15,
-    OPACITY_FULL_HP_TRANSPARENCY  = 0.9,
-    OPACITY_FULL_HP_DELAY         = 5,
-    OPACITY_IDLE_FADE_START       = 5,
-    OPACITY_IDLE_FADE_END         = 30,
-    OPACITY_MAX_IDLE_FADE         = 0.70,
-    OPACITY_FADE_IN_RATE          = 20,
-    OPACITY_FADE_OUT_RATE         = 2,
+    HB_LOWHP_OVERRIDE_ENABLED = true,
+    HB_LOWHP_THRESHOLD        = 0.33,
+    HB_LOWHP_FILL_TOP         = Color3.fromRGB(255, 0, 0),
+    HB_LOWHP_FILL_BOTTOM      = Color3.fromRGB(0, 0, 0),
+    HB_LOWHP_TEXT_TOP         = Color3.fromRGB(255, 120, 120),
+    HB_LOWHP_TEXT_BOTTOM      = Color3.fromRGB(180, 0, 0),
 
-    ALWAYS_VISIBLE       = false,
-    ALWAYS_VISIBLE_ALPHA = 0.15,
+    HB_ALPHA_BASE  = 0.3,
+    HB_ALPHA_SIGHT = 0.15,
+    HB_ALPHA_LOOK  = 0.0,
 
-    DEBUG_HEALTH = false,
+    HB_BG_EXTRA_TRANSPARENCY     = 0.15,
+    HB_NUMBER_EXTRA_TRANSPARENCY = 0.0,
 
-    PULSE_ENABLED          = true,
-    PULSE_DAMAGE_PER_HP    = 0.010,
-    PULSE_HEAL_PER_HP      = 0.006,
-    PULSE_MAX              = 0.40,
-    PULSE_IN_DURATION      = 0.12,
-    PULSE_OUT_DURATION     = 0.40,
-    PULSE_HEAL_IN_DURATION = 0.35,
-    PULSE_HEAL_OUT_DURATION = 0.70,
+    HB_BG_TRANSPARENCY   = 0.2,
+    HB_FILL_TRANSPARENCY = 0.0,
+    HB_NUMBER_ALPHA      = 0.0,
 
-    CIRCULAR_ENABLED      = true,
-    CIRCULAR_RADIUS       = 40,
-    CIRCULAR_SEGMENTS     = 12,
-    CIRCULAR_SEG_WIDTH    = 2,
-    CIRCULAR_SEG_OVERLAP  = 1.8,
-    CIRCULAR_ROUND_ENDS   = false,
-    CIRCULAR_START_ANGLE  = -72,
-    CIRCULAR_CLOCKWISE    = false,
-    CIRCULAR_UNFILLED_COLOR = Color3.fromRGB(40, 40, 40),
-    CIRCULAR_UNFILLED_TRANSPARENCY = 0.4,
+    HB_SHOW_NUMBER       = true,
+    HB_NUMBER_POSITION   = "Inside",
+    HB_NUMBER_SIZE       = 12,
+    HB_NUMBER_COLOR      = Color3.fromRGB(255, 255, 255),
+    HB_NUMBER_SHOW_MAX   = false,
 
-    -- ─── Shared name formatting ────────────────────────────────────────
-    NAME_MODE                 = "DisplayName",
-    NAME_TRUNCATE_USERNAME    = 8,
-    NAME_TRUNCATE_DISPLAYNAME = 8,
+    -- ─── Figma style sub-config ──────────────────────────────────────
+    -- Design reference. All decorations scale from HB_LENGTH / DESIGN_WIDTH.
+    HB_FIGMA = {
+        DESIGN_WIDTH = 204,
 
-    -- ─── View list ─────────────────────────────────────────────────────
-    VIEWLIST_ENABLED         = true,
-    VIEWLIST_WIDTH_MULT      = 1.25,
-    VIEWLIST_STACK_GAP       = 6,
-    VIEWLIST_OFFSET_X        = 0,
-    VIEWLIST_OFFSET_Y        = 0,
-    VIEWLIST_MAX_ROWS        = 8,
-    VIEWLIST_ROW_HEIGHT      = 16,
+        OUTLINE_ENABLED   = true,
+        OUTLINE_THICKNESS = 1,
+        OUTLINE_COLOR     = Color3.fromRGB(200, 200, 200),
 
-    -- Which categories of player to include
-    VIEWLIST_INCLUDE_SIGHT   = true,
-    VIEWLIST_INCLUDE_LOOK    = true,
-    VIEWLIST_INCLUDE_IDLE    = false,
-    VIEWLIST_IDLE_MAX_DISTANCE = 100,
+        CORNER_ENABLED   = true,
+        CORNER_SIZE      = 6,
+        CORNER_THICKNESS = 2,
+        CORNER_COLOR     = Color3.fromRGB(255, 255, 255),
 
-    -- Sort modes:
-    --   "Priority" — threat (look>sight>idle), then distance, then name
-    --   "Threat"   — threat, then sight vis fraction, then name
-    --   "Distance" — distance only
-    --   "Alpha"    — name only
-    --   "Team"     — team, then name
-    VIEWLIST_SORT            = "Priority",
+        TRACK_INSET_X = 3,
+        TRACK_INSET_Y = 3,
 
-    VIEWLIST_COLOR_MODE      = "Team",   -- "Team" | "Healthbar" | "Fixed"
-    VIEWLIST_FIXED_COLOR     = Color3.fromRGB(255, 255, 255),
-    VIEWLIST_SIGHT_THRESHOLD = 0.1,
+        -- BG is the depleted track. When false, fill floats directly.
+        BG_ENABLED      = true,
+        BG_COLOR        = Color3.fromRGB(45, 45, 45),
+        BG_TRANSPARENCY = 0,
 
-    VIEWLIST_SIZE_SIGHT      = 11,
-    VIEWLIST_SIZE_LOOK       = 13,
-    VIEWLIST_SIZE_IDLE       = 10,
-    VIEWLIST_BOLD_ON_LOOK    = true,
+        MIDLINE_ENABLED = true,
+        MIDLINE_HEIGHT  = 1,
+        MIDLINE_COLOR   = Color3.fromRGB(150, 150, 150),
 
-    -- Alpha tiers: idle → sight → look
-    VIEWLIST_ALPHA_BASE      = 0.65,
-    VIEWLIST_ALPHA_SIGHT     = 0.30,
-    VIEWLIST_ALPHA_LOOK      = 0.00,
+        DIVIDER_COUNT        = 4,
+        DIVIDER_WIDTH        = 1,
+        DIVIDER_COLOR        = Color3.fromRGB(200, 200, 200),
+        DIVIDER_EXTEND_TOP    = 4,
+        DIVIDER_EXTEND_BOTTOM = 4,
+    },
 
-    -- ─── Proximity color override ──────────────────────────────────────
-    -- When an entry is closer than PROXIMITY_DISTANCE studs, its color
-    -- is forced to a lerp between NEAR (at 0 studs) and FAR (at the
-    -- threshold), regardless of the color mode above.
-    VIEWLIST_PROXIMITY_ENABLED    = true,
-    VIEWLIST_PROXIMITY_DISTANCE   = 100,
-    VIEWLIST_PROXIMITY_NEAR_COLOR = Color3.fromRGB(255, 30, 30),    -- red, at 0 studs
-    VIEWLIST_PROXIMITY_FAR_COLOR  = Color3.fromRGB(255, 165, 0),    -- orange, at threshold
-
-    VIEWLIST_EMPTY_TEXT  = "",
-    VIEWLIST_EMPTY_COLOR = Color3.fromRGB(150, 150, 150),
-
-    KILL_KEYBIND    = Enum.KeyCode.K,
+    KILL_KEYBIND    = nil,
     UPDATE_INTERVAL = 0,
 }
+
+local DEFAULT_ESP_COLOR = Color3.fromRGB(255, 255, 255)
+
+--------------------------------------------------------------------------------
+-- HELPERS
+--------------------------------------------------------------------------------
+local function rgb(c)
+    return string.format("rgb(%d,%d,%d)", c.R * 255, c.G * 255, c.B * 255)
+end
+
+local function healthColor(hp)
+    local pct = math.clamp(hp / 150, 0, 1)
+    return Color3.fromRGB(255 * (1 - pct), 255 * pct, 0)
+end
+
+local function distanceColor(dist)
+    local pct = math.clamp(dist / 1000, 0, 1)
+    return Color3.fromRGB(255 * (1 - pct), 255 * pct, 0)
+end
+
+local function getTeamColor(player)
+    local ok, team = pcall(function() return player.Team end)
+    if not ok or not team then return nil end
+    local ok2, brick = pcall(function() return team.TeamColor end)
+    if not ok2 or not brick then return nil end
+    if brick == BrickColor.new("Neutral") then return nil end
+    return brick.Color
+end
+
+local function resolveHealthColor(pct, teamColor, cfg, mode)
+    if cfg.HB_LOWHP_OVERRIDE_ENABLED and pct < cfg.HB_LOWHP_THRESHOLD then
+        local t = pct / math.max(cfg.HB_LOWHP_THRESHOLD, 1e-3)
+        if mode == "fill" then
+            return cfg.HB_LOWHP_FILL_BOTTOM:Lerp(cfg.HB_LOWHP_FILL_TOP, t)
+        else
+            return cfg.HB_LOWHP_TEXT_BOTTOM:Lerp(cfg.HB_LOWHP_TEXT_TOP, t)
+        end
+    end
+    if mode == "fill" then
+        if cfg.HB_USE_TEAM_COLOR_FILL and teamColor then return teamColor end
+        if cfg.HB_FILL_COLOR then return cfg.HB_FILL_COLOR end
+        return Color3.fromRGB(255 * (1 - pct), 255 * pct, 0)
+    else
+        if cfg.HB_USE_TEAM_COLOR_TEXT and teamColor then return teamColor end
+        return cfg.HB_NUMBER_COLOR
+    end
+end
+
+-- px helper: at least 1 pixel so nothing disappears at small scales.
+local function px(v)
+    return math.max(1, math.floor(v + 0.5))
+end
 
 --------------------------------------------------------------------------------
 -- MODULE
 --------------------------------------------------------------------------------
-local SelfHealthbar = {}
-SelfHealthbar.__index = SelfHealthbar
+local ESP = {}
+ESP.__index = ESP
 
-local FONT_BOLD_MAP = {
-    [Enum.Font.Gotham]              = Enum.Font.GothamBold,
-    [Enum.Font.GothamMedium]        = Enum.Font.GothamBold,
-    [Enum.Font.GothamSemibold]      = Enum.Font.GothamBold,
-    [Enum.Font.SourceSans]          = Enum.Font.SourceSansBold,
-    [Enum.Font.SourceSansSemibold]  = Enum.Font.SourceSansBold,
-    [Enum.Font.SourceSansLight]     = Enum.Font.SourceSansBold,
-    [Enum.Font.SourceSansItalic]    = Enum.Font.SourceSansBold,
-    [Enum.Font.Arial]               = Enum.Font.ArialBold,
-}
-
-local function clamp(v, a, b) return math.max(a, math.min(b, v)) end
-local function lerp(a, b, t) return a + (b - a) * t end
-local function resolveFont(baseFont, bold)
-    if not bold then return baseFont end
-    return FONT_BOLD_MAP[baseFont] or Enum.Font.GothamBold
-end
-
-local function truncateName(s, maxLen)
-    if not maxLen or maxLen <= 0 then return s end
-    if #s <= maxLen then return s end
-    return s:sub(1, maxLen) .. ".."
-end
-
-function SelfHealthbar.new(overrides)
-    local self = setmetatable({}, SelfHealthbar)
+function ESP.new(overrides)
+    local self = setmetatable({}, ESP)
     self.config = {}
     for k, v in pairs(DEFAULTS) do self.config[k] = v end
     if overrides then
-        for k, v in pairs(overrides) do self.config[k] = v end
+        for k, v in pairs(overrides) do
+            if k == "HB_FIGMA" and type(v) == "table" then
+                -- Deep merge for HB_FIGMA
+                for kk, vv in pairs(v) do self.config.HB_FIGMA[kk] = vv end
+            else
+                self.config[k] = v
+            end
+        end
     end
 
-    self._humanoid       = nil
-    self._character      = nil
-    self._charConn       = nil
-    self._lastHealth     = nil
-    self._lastChangeTime = 0
-    self._lastFullHPTime = nil
-    self._recentChanges  = {}
-    self._currentAlpha   = 0.15
-    self._barWidthPx     = 180
-    self._barHeightPx    = 11
-    self._hudSize        = UDim2.fromOffset(380, 151)
-    self._shakeActive    = false
-    self._ringSegments   = {}
-    self._viewListRows   = {}
-    self._lastUpdate     = 0
-    self._lastDt         = 1 / 60
-    self._lastTick       = os.clock()
-
+    self._objects     = {}
+    self._nameColors  = {}
     self._connections = {}
     self._running     = false
-
-    self:_buildUI()
-    self:_recomputeBaseSize()
+    self._lastUpdate  = 0
+    self._espVisible  = true
+    self._textVisible = true
+    self._activeNtSize = nil
 
     return self
 end
 
-function SelfHealthbar:_track(conn)
+function ESP:_track(conn)
     self._connections[#self._connections + 1] = conn
     return conn
 end
 
---------------------------------------------------------------------------------
--- COLOR HELPERS
---------------------------------------------------------------------------------
-function SelfHealthbar:_getLocalTeamColor()
-    local team = LocalPlayer.Team
-    if team and team.TeamColor and team.TeamColor ~= BrickColor.new("Neutral") then
-        return team.TeamColor.Color
+function ESP:_getHealth(character)
+    local hpValue = character:FindFirstChild("Health", true)
+    if hpValue then
+        local ok, val = pcall(function() return hpValue.Value end)
+        if ok and typeof(val) == "number" then return val end
     end
-    return nil
+    local hum = character:FindFirstChildOfClass("Humanoid")
+    if hum then return hum.Health end
+    return 0
 end
 
-function SelfHealthbar:_getPlayerTeamColor(player)
-    if not player then return nil end
-    local team = player.Team
-    if team and team.TeamColor and team.TeamColor ~= BrickColor.new("Neutral") then
-        return team.TeamColor.Color
-    end
-    return nil
+function ESP:_getMaxHealth(character)
+    local hum = character:FindFirstChildOfClass("Humanoid")
+    if hum and hum.MaxHealth > 0 then return hum.MaxHealth end
+    return 100
 end
 
-function SelfHealthbar:_autoFillColor(pct)
-    return Color3.fromRGB(255 * (1 - pct), 255 * pct, 0)
-end
+function ESP:_getNameColor(player)
+    local cached = self._nameColors[player]
+    if cached then return cached end
 
-function SelfHealthbar:_resolveFillColor(pct)
-    local cfg = self.config
-    if cfg.LOWHP_OVERRIDE_ENABLED and pct < cfg.LOWHP_THRESHOLD then
-        local t = pct / math.max(cfg.LOWHP_THRESHOLD, 1e-3)
-        return cfg.LOWHP_FILL_BOTTOM:Lerp(cfg.LOWHP_FILL_TOP, t)
-    end
-    if cfg.USE_TEAM_COLOR_FILL then
-        local tc = self:_getLocalTeamColor()
-        if tc then return tc end
-    end
-    if cfg.BAR_FILL_COLOR_AUTO then return self:_autoFillColor(pct) end
-    return cfg.BAR_FILL_COLOR
-end
+    local username = player.Name:lower()
+    local display  = player.DisplayName:lower()
 
-function SelfHealthbar:_resolveBorderColor(pct, fillColor)
-    local cfg = self.config
-    if cfg.LOWHP_OVERRIDE_ENABLED and pct < cfg.LOWHP_THRESHOLD then
-        local t = pct / math.max(cfg.LOWHP_THRESHOLD, 1e-3)
-        return cfg.LOWHP_BORDER_BOTTOM:Lerp(cfg.LOWHP_BORDER_TOP, t)
-    end
-    if cfg.USE_TEAM_COLOR_BORDER then
-        local tc = self:_getLocalTeamColor()
-        if tc then return tc end
-    end
-    if cfg.BAR_BORDER_AUTO then
-        return Color3.new(
-            fillColor.R * cfg.BAR_BORDER_OFFSET,
-            fillColor.G * cfg.BAR_BORDER_OFFSET,
-            fillColor.B * cfg.BAR_BORDER_OFFSET
-        )
-    end
-    return cfg.BAR_BORDER_COLOR
-end
-
---------------------------------------------------------------------------------
--- NAME FORMATTING
---------------------------------------------------------------------------------
-function SelfHealthbar:_formatPlayerName(player)
-    local cfg = self.config
-    local mode = cfg.NAME_MODE or "DisplayName"
-    local un = truncateName(player.Name,        cfg.NAME_TRUNCATE_USERNAME or 0)
-    local dn = truncateName(player.DisplayName, cfg.NAME_TRUNCATE_DISPLAYNAME or 0)
-    if mode == "Username" then
-        return un
-    elseif mode == "Both" then
-        return un .. " (" .. dn .. ")"
-    else
-        return dn
-    end
-end
-
---------------------------------------------------------------------------------
--- TEXT FORMAT / ANCHORS
---------------------------------------------------------------------------------
-function SelfHealthbar:_formatText(hp, maxHp, pct)
-    local f = self.config.TEXT_FORMAT
-    local hpI = math.floor(hp)
-    local mI  = math.floor(maxHp)
-    local pI  = math.floor(pct * 100 + 0.5)
-    if f == "HPMAX_PCT" then return string.format("%d/%d | %d%%", hpI, mI, pI) end
-    if f == "HP_PCT"    then return string.format("%d | %d%%", hpI, pI) end
-    if f == "HPMAX"     then return string.format("%d/%d", hpI, mI) end
-    if f == "HP"        then return tostring(hpI) end
-    if f == "PCT"       then return string.format("%d%%", pI) end
-    return string.format("%d/%d | %d%%", hpI, mI, pI)
-end
-
-function SelfHealthbar:_resolveAnchor(mode, halfW, halfH, gap)
-    if mode == "Above" then
-        return 0.5, 1,   0, -halfH - gap
-    elseif mode == "Below" then
-        return 0.5, 0,   0,  halfH + gap
-    elseif mode == "Left" then
-        return 1,   0.5, -halfW - gap, 0
-    elseif mode == "Right" then
-        return 0,   0.5,  halfW + gap, 0
-    else
-        return 0.5, 0.5, 0, 0
-    end
-end
-
---------------------------------------------------------------------------------
--- UI BUILDING
---------------------------------------------------------------------------------
-function SelfHealthbar:_buildUI()
-    local cfg = self.config
-
-    local gui = Instance.new("ScreenGui")
-    gui.Name           = "SelfHealthbar"
-    gui.ResetOnSpawn   = false
-    gui.IgnoreGuiInset = true
-    gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-    gui.Parent         = LocalPlayer:WaitForChild("PlayerGui")
-    self._gui = gui
-
-    local root = Instance.new("Frame")
-    root.Name                   = "Root"
-    root.BackgroundTransparency = 1
-    root.Size                   = UDim2.fromOffset(2, 2)
-    root.AnchorPoint            = Vector2.new(0.5, 0.5)
-    root.Position               = UDim2.new(0, 100, 0, 100)
-    root.Parent                 = gui
-    self._root = root
-
-    local hud = Instance.new("CanvasGroup")
-    hud.Name                   = "HUD"
-    hud.BackgroundTransparency = 1
-    hud.AnchorPoint            = Vector2.new(0.5, 0.5)
-    hud.Position               = UDim2.new(0.5, 0, 0.5, 0)
-    hud.Size                   = self._hudSize
-    hud.GroupTransparency      = 0
-    hud.Parent                 = root
-    self._hud = hud
-
-    local bar = Instance.new("Frame")
-    bar.Name                   = "Bar"
-    bar.AnchorPoint            = Vector2.new(0.5, 0.5)
-    bar.Position               = UDim2.new(0.5, 0, 0.5, 0)
-    bar.Size                   = UDim2.fromOffset(self._barWidthPx, self._barHeightPx)
-    bar.BackgroundColor3       = cfg.BAR_FILL_COLOR
-    bar.BackgroundTransparency = cfg.BAR_FILL_TRANSPARENCY
-    bar.BorderSizePixel        = 0
-    bar.Parent                 = hud
-    self._bar = bar
-
-    local stroke = Instance.new("UIStroke")
-    stroke.Color        = cfg.BAR_BORDER_COLOR
-    stroke.Thickness    = cfg.BAR_BORDER_THICKNESS
-    stroke.Transparency = cfg.BAR_BORDER_TRANSPARENCY
-    stroke.Parent       = bar
-    self._stroke = stroke
-
-    if cfg.BAR_ROUNDED then
-        local c = Instance.new("UICorner")
-        c.CornerRadius = UDim.new(0, cfg.BAR_CORNER_RADIUS)
-        c.Parent = bar
-    end
-
-    local textLabel = Instance.new("TextLabel")
-    textLabel.Name                   = "Text"
-    textLabel.BackgroundTransparency = 1
-    textLabel.AnchorPoint            = Vector2.new(0.5, 1)
-    textLabel.Position               = UDim2.new(0.5, 0, 0.5, -self._barHeightPx / 2 - cfg.TEXT_POSITION_GAP)
-    textLabel.Size                   = UDim2.fromOffset(cfg.TEXT_LABEL_WIDTH, 18)
-    textLabel.Font                   = resolveFont(cfg.TEXT_FONT, cfg.TEXT_BOLD)
-    textLabel.TextScaled             = false
-    textLabel.TextWrapped            = cfg.TEXT_WRAPPED
-    textLabel.TextSize               = cfg.TEXT_SIZE
-    textLabel.TextColor3             = cfg.TEXT_COLOR
-    textLabel.TextTransparency       = cfg.TEXT_TRANSPARENCY
-    textLabel.TextStrokeTransparency = cfg.TEXT_STROKE_TRANSPARENCY
-    textLabel.TextStrokeColor3       = cfg.TEXT_STROKE_COLOR
-    textLabel.Text                   = ""
-    textLabel.Visible                = cfg.TEXT_ENABLED
-    textLabel.Parent                 = hud
-    self._textLabel = textLabel
-
-    self._textUIStroke = nil
-    if cfg.TEXT_STROKE_WIDTH and cfg.TEXT_STROKE_WIDTH > 1 then
-        local s = Instance.new("UIStroke")
-        s.ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual
-        s.Thickness       = cfg.TEXT_STROKE_WIDTH
-        s.Color           = cfg.TEXT_STROKE_COLOR
-        s.Transparency    = cfg.TEXT_STROKE_TRANSPARENCY
-        s.Parent          = textLabel
-        textLabel.TextStrokeTransparency = 1
-        self._textUIStroke = s
-    end
-
-    local dpsLabel = Instance.new("TextLabel")
-    dpsLabel.Name                   = "DPS"
-    dpsLabel.BackgroundTransparency = 1
-    dpsLabel.AnchorPoint            = Vector2.new(0.5, 0)
-    dpsLabel.Position               = UDim2.new(0.5, 0, 0.5, self._barHeightPx / 2 + cfg.DPS_POSITION_GAP)
-    dpsLabel.Size                   = UDim2.fromOffset(cfg.DPS_LABEL_WIDTH, 14)
-    dpsLabel.Font                   = resolveFont(cfg.DPS_FONT, cfg.DPS_BOLD)
-    dpsLabel.TextScaled             = false
-    dpsLabel.TextWrapped            = cfg.DPS_WRAPPED
-    dpsLabel.TextSize               = cfg.DPS_SIZE
-    dpsLabel.TextColor3             = Color3.new(1, 1, 1)
-    dpsLabel.TextStrokeTransparency = cfg.DPS_STROKE_TRANSPARENCY
-    dpsLabel.TextStrokeColor3       = Color3.fromRGB(0, 0, 0)
-    dpsLabel.Text                   = ""
-    dpsLabel.Visible                = false
-    dpsLabel.Parent                 = hud
-    self._dpsLabel = dpsLabel
-
-    local circular = Instance.new("Frame")
-    circular.Name                   = "Circular"
-    circular.BackgroundTransparency = 1
-    circular.AnchorPoint            = Vector2.new(0.5, 0.5)
-    circular.Position               = UDim2.new(0.5, 0, 0.5, 0)
-    circular.Size                   = UDim2.fromOffset(0, 0)
-    circular.Visible                = cfg.CIRCULAR_ENABLED
-    circular.Parent                 = hud
-    self._circular = circular
-
-    self:_rebuildCircular()
-
-    local viewListContainer = Instance.new("Frame")
-    viewListContainer.Name                   = "ViewList"
-    viewListContainer.BackgroundTransparency = 1
-    viewListContainer.AnchorPoint            = Vector2.new(0.5, 0)
-    viewListContainer.Position               = UDim2.new(0.5, 0, 0.5, 0)
-    viewListContainer.Size                   = UDim2.fromOffset(100, 0)
-    viewListContainer.Visible                = false
-    viewListContainer.Parent                 = hud
-    self._viewListContainer = viewListContainer
-
-    local emptyLabel = Instance.new("TextLabel")
-    emptyLabel.Name                   = "EmptyState"
-    emptyLabel.BackgroundTransparency = 1
-    emptyLabel.AnchorPoint            = Vector2.new(0.5, 0)
-    emptyLabel.Position               = UDim2.new(0.5, 0, 0, 0)
-    emptyLabel.Size                   = UDim2.new(1, 0, 0, cfg.VIEWLIST_ROW_HEIGHT)
-    emptyLabel.Font                   = Enum.Font.Gotham
-    emptyLabel.TextScaled             = false
-    emptyLabel.TextSize               = cfg.VIEWLIST_SIZE_SIGHT
-    emptyLabel.TextColor3             = cfg.VIEWLIST_EMPTY_COLOR
-    emptyLabel.TextStrokeTransparency = 0.6
-    emptyLabel.TextStrokeColor3       = Color3.fromRGB(0, 0, 0)
-    emptyLabel.Text                   = ""
-    emptyLabel.Visible                = false
-    emptyLabel.Parent                 = viewListContainer
-    self._viewListEmpty = emptyLabel
-end
-
-function SelfHealthbar:_rebuildCircular()
-    for _, seg in ipairs(self._ringSegments) do
-        if seg and seg.Parent then seg:Destroy() end
-    end
-    self._ringSegments = {}
-
-    local cfg = self.config
-    if not cfg.CIRCULAR_ENABLED then
-        self._bar.Visible = true
-        return
-    end
-    self._bar.Visible = false
-
-    local N = cfg.CIRCULAR_SEGMENTS
-    local R = cfg.CIRCULAR_RADIUS
-    local startRad = math.rad(cfg.CIRCULAR_START_ANGLE)
-
-    local arcLen = (2 * math.pi * R) / N
-    local segLen = arcLen * cfg.CIRCULAR_SEG_OVERLAP
-    local segWidth = cfg.CIRCULAR_SEG_WIDTH
-
-    for i = 1, N do
-        local frac = (i - 1) / N
-        if not cfg.CIRCULAR_CLOCKWISE then frac = 1 - frac end
-        local angle = startRad + frac * math.pi * 2
-        local x = math.cos(angle) * R
-        local y = math.sin(angle) * R
-
-        local seg = Instance.new("Frame")
-        seg.Name                   = "Seg_" .. i
-        seg.AnchorPoint            = Vector2.new(0.5, 0.5)
-        seg.Position               = UDim2.new(0.5, x, 0.5, y)
-        seg.Size                   = UDim2.fromOffset(segLen, segWidth)
-        seg.Rotation               = math.deg(angle) + 90
-        seg.BackgroundColor3       = cfg.BAR_FILL_COLOR
-        seg.BorderSizePixel        = 0
-        seg.ZIndex                 = 2 + i
-
-        if cfg.CIRCULAR_ROUND_ENDS then
-            local corner = Instance.new("UICorner")
-            corner.CornerRadius = UDim.new(0, math.max(1, segWidth / 2))
-            corner.Parent = seg
+    local function matches(tbl)
+        for _, str in ipairs(tbl) do
+            str = str:lower()
+            if username:find(str, 1, true) or display:find(str, 1, true) then
+                return true
+            end
         end
-
-        seg.Parent = self._circular
-        self._ringSegments[i] = seg
+        return false
     end
+
+    local color
+    if matches(self.config.ESPBlacklist) then
+        color = Color3.fromRGB(255, 0, 0)
+    elseif matches(self.config.ESPWhitelist) then
+        color = Color3.fromRGB(255, 255, 0)
+    elseif self.config.ESPFriendColor then
+        local ok, isFriend = pcall(function()
+            return LocalPlayer:IsFriendsWith(player.UserId)
+        end)
+        if ok and isFriend then
+            color = Color3.fromRGB(255, 255, 255)
+        end
+    end
+
+    if not color then
+        if self.config.ESPUseTeamColor then
+            color = getTeamColor(player)
+        end
+        if not color then
+            color = DEFAULT_ESP_COLOR
+        end
+    end
+
+    self._nameColors[player] = color
+    return color
 end
 
-function SelfHealthbar:_ensureViewListRow(n)
-    while #self._viewListRows < n do
-        local row = Instance.new("TextLabel")
-        row.Name                   = "ViewRow_" .. (#self._viewListRows + 1)
-        row.BackgroundTransparency = 1
-        row.AnchorPoint            = Vector2.new(0.5, 0)
-        row.Position               = UDim2.new(0.5, 0, 0, #self._viewListRows * self.config.VIEWLIST_ROW_HEIGHT)
-        row.Size                   = UDim2.new(1, 0, 0, self.config.VIEWLIST_ROW_HEIGHT)
-        row.Font                   = Enum.Font.Gotham
-        row.TextScaled             = false
-        row.TextSize               = self.config.VIEWLIST_SIZE_SIGHT
-        row.TextColor3             = Color3.new(1, 1, 1)
-        row.TextStrokeTransparency = 0.6
-        row.TextStrokeColor3       = Color3.fromRGB(0, 0, 0)
-        row.Text                   = ""
-        row.Visible                = false
-        row.Parent                 = self._viewListContainer
-        self._viewListRows[#self._viewListRows + 1] = row
+function ESP:_computeScreenScale(char, root)
+    if not self.config.SCALE_ENABLED then return 1 end
+    local cam = workspace.CurrentCamera
+    if not cam then return 1 end
+    local head = char:FindFirstChild("Head")
+    if not head then return 1 end
+    local headScreen = cam:WorldToViewportPoint(head.Position)
+    local feetScreen = cam:WorldToViewportPoint(
+        root.Position - Vector3.new(0, 2.5, 0)
+    )
+    local screenHeight = math.abs(headScreen.Y - feetScreen.Y)
+    local reference    = math.max(self.config.SCALE_REFERENCE_HEIGHT, 1)
+    local raw          = screenHeight / reference
+    return math.clamp(raw, self.config.SCALE_MIN, self.config.SCALE_MAX)
+end
+
+function ESP:_resolveAlphas(hit, sightSeen, rootPos)
+    local cfg = self.config
+    local ntAlpha, hbAlpha
+
+    if cfg.INTEGRATION_ENABLED then
+        if hit then
+            ntAlpha, hbAlpha = cfg.NT_ALPHA_LOOK, cfg.HB_ALPHA_LOOK
+        elseif sightSeen then
+            ntAlpha, hbAlpha = cfg.NT_ALPHA_SIGHT, cfg.HB_ALPHA_SIGHT
+        else
+            ntAlpha, hbAlpha = cfg.NT_ALPHA_BASE, cfg.HB_ALPHA_BASE
+        end
+    else
+        ntAlpha = cfg.NT_ALPHA_BASE
+        hbAlpha = cfg.HB_FILL_TRANSPARENCY
     end
+
+    if cfg.CENTER_OVERRIDE_ENABLED then
+        local cf = self:_centerFactor(rootPos)
+        if cf > 0 then
+            local centerAlpha = cfg.CENTER_MAX_ALPHA
+                + (1 - cfg.CENTER_MAX_ALPHA) * (1 - cf)
+            ntAlpha = math.min(ntAlpha, centerAlpha)
+            hbAlpha = math.min(hbAlpha, centerAlpha)
+        end
+    end
+    return ntAlpha, hbAlpha
+end
+
+function ESP:_centerFactor(worldPos)
+    local cam = workspace.CurrentCamera
+    if not cam then return 0 end
+    local toTarget = (worldPos - cam.CFrame.Position)
+    if toTarget.Magnitude < 1e-4 then return 0 end
+    toTarget = toTarget.Unit
+    local look = cam.CFrame.LookVector
+    local dot  = look:Dot(toTarget)
+    local cosFalloff = math.cos(math.rad(self.config.CENTER_FALLOFF_DEGREES))
+    if dot <= cosFalloff then return 0 end
+    return (dot - cosFalloff) / (1 - cosFalloff)
+end
+
+function ESP:_getViewLinesState(player)
+    local bus = getgenv().ModuleBus
+    if not bus or not bus.ViewLines or not bus.ViewLines.Active then
+        return false, 0
+    end
+    local hit = bus.ViewLines.Hit[player] == true
+    local vis = bus.ViewLines.Visibility[player] or 0
+    return hit, vis
 end
 
 --------------------------------------------------------------------------------
 -- LAYOUT
 --------------------------------------------------------------------------------
-function SelfHealthbar:_healthbarWidthPx()
+function ESP:_computeLayout(scale)
     local cfg = self.config
-    if cfg.CIRCULAR_ENABLED then
-        return cfg.CIRCULAR_RADIUS * 2
+    local ntSize = self._activeNtSize or cfg.NT_SIZE_BASE
+    local isVertical = (cfg.ESP_NAME_FORMAT == "Vertical")
+
+    local nameH = ntSize + 6
+    local subH  = isVertical and (ntSize + 4) or 0
+    local lineSpacing = isVertical and (cfg.NT_LINE_SPACING or 0) or 0
+    local textH = nameH + subH + lineSpacing
+    local textW = cfg.ESP_NAME_WIDTH
+
+    local hb = {
+        enabled = cfg.HB_ENABLED,
+        pos     = cfg.HB_POSITION,
+        len     = cfg.HB_LENGTH    * scale,
+        thick   = cfg.HB_THICKNESS * scale,
+        gap     = cfg.HB_GAP,
+    }
+
+    local bbW, bbH
+    if not hb.enabled then
+        bbW, bbH = textW, textH
+    elseif hb.pos == "Top" or hb.pos == "Bottom" then
+        bbW = math.max(textW, hb.len)
+        bbH = textH + hb.thick + hb.gap
     else
-        return self._barWidthPx
+        bbW = textW + hb.thick + hb.gap
+        bbH = math.max(textH, hb.len)
     end
+
+    return bbW, bbH, textW, textH, nameH, subH, hb, lineSpacing
 end
 
-function SelfHealthbar:_positionText()
-    local cfg = self.config
-    local halfW, halfH
-    if cfg.CIRCULAR_ENABLED then
-        halfW, halfH = cfg.CIRCULAR_RADIUS, cfg.CIRCULAR_RADIUS
-    else
-        halfW, halfH = self._barWidthPx / 2, self._barHeightPx / 2
+--------------------------------------------------------------------------------
+-- HEALTHBAR BUILDERS
+--------------------------------------------------------------------------------
+-- Simple style: BG + Fill + Number (original)
+function ESP:_buildSimpleBar(parent, cfg, scale)
+    local refs = {}
+    local isVertical = (cfg.HB_POSITION == "Top" or cfg.HB_POSITION == "Bottom")
+
+    -- For simplicity the simple style still uses local W/H tracking.
+    -- Bar dimensions are set during layout.
+    local back = Instance.new("Frame")
+    back.Name                   = "HB_Back"
+    back.BackgroundColor3       = cfg.HB_BG_COLOR
+    back.BackgroundTransparency = cfg.HB_BG_TRANSPARENCY
+    back.BorderSizePixel        = 0
+    back.Visible                = cfg.HB_ENABLED
+    back.Parent                 = parent
+
+    if cfg.HB_BORDER then
+        local stroke = Instance.new("UIStroke")
+        stroke.Color     = cfg.HB_BORDER_COLOR
+        stroke.Thickness = cfg.HB_BORDER_THICKNESS
+        stroke.Parent    = back
+    end
+    if cfg.HB_ROUNDED then
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(0, cfg.HB_CORNER_RADIUS)
+        corner.Parent = back
     end
 
-    local ax, ay, sx, sy = self:_resolveAnchor(
-        cfg.TEXT_POSITION, halfW, halfH, cfg.TEXT_POSITION_GAP
-    )
+    local fill = Instance.new("Frame")
+    fill.Name                   = "HB_Fill"
+    fill.BackgroundColor3       = Color3.fromRGB(0, 255, 0)
+    fill.BackgroundTransparency = cfg.HB_FILL_TRANSPARENCY
+    fill.BorderSizePixel        = 0
+    fill.Size                   = UDim2.fromScale(1, 1)
+    fill.Parent                 = back
+    if cfg.HB_ROUNDED then
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(0, cfg.HB_CORNER_RADIUS)
+        corner.Parent = fill
+    end
 
-    local tl = self._textLabel
-    tl.AnchorPoint = Vector2.new(ax, ay)
-    tl.Position    = UDim2.new(
-        0.5, sx + (cfg.TEXT_OFFSET_X or 0),
-        0.5, sy + (cfg.TEXT_OFFSET_Y or 0)
-    )
-    tl.Font        = resolveFont(cfg.TEXT_FONT, cfg.TEXT_BOLD)
-    tl.TextWrapped = cfg.TEXT_WRAPPED
-    tl.Size        = UDim2.fromOffset(cfg.TEXT_LABEL_WIDTH, tl.Size.Y.Offset)
+    local number
+    if cfg.HB_SHOW_NUMBER then
+        number = Instance.new("TextLabel")
+        number.Name                   = "HB_Number"
+        number.BackgroundTransparency = 1
+        number.Font                   = Enum.Font.GothamBold
+        number.TextScaled             = false
+        number.TextSize               = cfg.HB_NUMBER_SIZE
+        number.TextColor3             = cfg.HB_NUMBER_COLOR
+        number.TextTransparency       = cfg.HB_NUMBER_ALPHA
+        number.TextStrokeTransparency = 0
+        number.Text                   = ""
+        number.Parent                 = parent
+    end
+
+    refs.style    = "Simple"
+    refs.Back     = back
+    refs.Fill     = fill
+    refs.Number   = number
+    return refs
 end
 
-function SelfHealthbar:_positionDps()
-    local cfg = self.config
-    local halfW, halfH
-    if cfg.CIRCULAR_ENABLED then
-        halfW, halfH = cfg.CIRCULAR_RADIUS, cfg.CIRCULAR_RADIUS
-    else
-        halfW, halfH = self._barWidthPx / 2, self._barHeightPx / 2
+-- Figma style: full design from the standalone mockup, parameterized by scale.
+-- Returns refs table with all created instances for later updates.
+function ESP:_buildFigmaBar(parent, cfg, scale)
+    local F = cfg.HB_FIGMA
+    local refs = {}
+
+    -- Design reference scaling. All decorations scale by `s`. Clamp to 1px min.
+    local s = math.max(scale * (cfg.HB_LENGTH / F.DESIGN_WIDTH), 0.05)
+    local function dpx(v) return math.max(1, math.floor(v * s + 0.5)) end
+
+    -- Outer container for the whole Figma healthbar. This is what rotates
+    -- for vertical positions.
+    local barW = cfg.HB_LENGTH * scale
+    local barH = cfg.HB_THICKNESS * scale
+
+    local hbRoot = Instance.new("Frame")
+    hbRoot.Name                   = "HB_FigmaRoot"
+    hbRoot.BackgroundTransparency = 1
+    hbRoot.BorderSizePixel        = 0
+    hbRoot.Size                   = UDim2.fromOffset(barW, barH)
+    hbRoot.AnchorPoint            = Vector2.new(0.5, 0.5)
+    hbRoot.Parent                 = parent
+
+    -- Orientation: rotate 90° for Left/Right
+    local isVertical = (cfg.HB_POSITION == "Left" or cfg.HB_POSITION == "Right")
+    hbRoot.Rotation = isVertical and 90 or 0
+
+    -- TrackRegion: interior inset container
+    local insetX = dpx(F.TRACK_INSET_X)
+    local insetY = dpx(F.TRACK_INSET_Y)
+
+    -- For a rotated (vertical) bar, the LOCAL width/height are still the
+    -- horizontal layout. Rotation handles presentation.
+    local container = Instance.new("Frame")
+    container.Name                   = "FigmaContainer"
+    container.BackgroundTransparency = 1
+    container.Size                   = UDim2.fromOffset(barW, barH)
+    container.Position               = UDim2.fromOffset(0, 0)
+    container.Parent                 = hbRoot
+
+    -- BG (track)
+    local trackW = barW - insetX * 2
+    local trackH = barH - insetY * 2
+    if trackW < 1 then trackW = 1 end
+    if trackH < 1 then trackH = 1 end
+
+    local bg
+    if F.BG_ENABLED then
+        bg = Instance.new("Frame")
+        bg.Name                   = "BG"
+        bg.BackgroundColor3       = F.BG_COLOR
+        bg.BackgroundTransparency = F.BG_TRANSPARENCY
+        bg.BorderSizePixel        = 0
+        bg.Position               = UDim2.fromOffset(insetX, insetY)
+        bg.Size                   = UDim2.fromOffset(trackW, trackH)
+        bg.Parent                 = container
     end
 
-    local dl = self._dpsLabel
+    -- Fill (HP-colored) — parented to container so it floats over BG
+    local fill = Instance.new("Frame")
+    fill.Name                   = "Fill"
+    fill.BackgroundColor3       = Color3.fromRGB(0, 255, 0)
+    fill.BorderSizePixel        = 0
+    fill.Position               = UDim2.fromOffset(insetX, insetY)
+    fill.Size                   = UDim2.fromOffset(trackW, trackH)
+    fill.Parent                 = container
 
-    if cfg.DPS_FOLLOW_TEXT and cfg.TEXT_ENABLED then
-        local _, _, sx, sy = self:_resolveAnchor(
-            cfg.TEXT_POSITION, halfW, halfH, cfg.TEXT_POSITION_GAP
+    -- Midline
+    if F.MIDLINE_ENABLED then
+        local mh = dpx(F.MIDLINE_HEIGHT)
+        local mid = Instance.new("Frame")
+        mid.Name                   = "Midline"
+        mid.BackgroundColor3       = F.MIDLINE_COLOR
+        mid.BorderSizePixel        = 0
+        mid.Position               = UDim2.fromOffset(
+            insetX,
+            insetY + math.floor((trackH - mh) / 2 + 0.5)
         )
-        local hpX = sx + (cfg.TEXT_OFFSET_X or 0)
-        local hpY = sy + (cfg.TEXT_OFFSET_Y or 0)
-        local stack = self._textLabel.Size.Y.Offset
+        mid.Size                   = UDim2.fromOffset(trackW, mh)
+        mid.Parent                 = container
+    end
 
-        local dpsAnchorY, dpsY
-        if cfg.TEXT_POSITION == "Above" then
-            dpsAnchorY = 1
-            dpsY = hpY - stack
-        else
-            dpsAnchorY = 0
-            dpsY = hpY + stack
+    -- Dividers with extension above/below track
+    local dividers = {}
+    if F.DIVIDER_COUNT and F.DIVIDER_COUNT > 1 then
+        local dw = dpx(F.DIVIDER_WIDTH)
+        local extTop = dpx(F.DIVIDER_EXTEND_TOP)
+        local extBot = dpx(F.DIVIDER_EXTEND_BOTTOM)
+        local divH = trackH + extTop + extBot
+
+        for i = 1, F.DIVIDER_COUNT - 1 do
+            local frac = i / F.DIVIDER_COUNT
+            local x = insetX + math.floor(trackW * frac + 0.5)
+
+            local div = Instance.new("Frame")
+            div.Name            = "Divider" .. i
+            div.BackgroundColor3 = F.DIVIDER_COLOR
+            div.BorderSizePixel = 0
+            div.Position        = UDim2.fromOffset(x, insetY - extTop)
+            div.Size            = UDim2.fromOffset(dw, divH)
+            div.Parent          = container
+            dividers[#dividers + 1] = div
+        end
+    end
+
+    -- Outline (4 frames)
+    local outlineFrames = {}
+    if F.OUTLINE_ENABLED then
+        local T = dpx(F.OUTLINE_THICKNESS)
+        local OC = F.OUTLINE_COLOR
+
+        local function makeOutline(name, pos, size)
+            local f = Instance.new("Frame")
+            f.Name            = name
+            f.BackgroundColor3 = OC
+            f.BorderSizePixel = 0
+            f.Position        = pos
+            f.Size            = size
+            f.Parent          = container
+            outlineFrames[#outlineFrames + 1] = f
         end
 
-        dl.AnchorPoint = Vector2.new(0.5, dpsAnchorY)
-        dl.Position    = UDim2.new(
-            0.5, hpX + (cfg.DPS_OFFSET_X or 0),
-            0.5, dpsY + (cfg.DPS_OFFSET_Y or 0)
-        )
-    else
-        local ax, ay, sx, sy = self:_resolveAnchor(
-            cfg.DPS_POSITION, halfW, halfH, cfg.DPS_POSITION_GAP
-        )
-        dl.AnchorPoint = Vector2.new(ax, ay)
-        dl.Position    = UDim2.new(
-            0.5, sx + (cfg.DPS_OFFSET_X or 0),
-            0.5, sy + (cfg.DPS_OFFSET_Y or 0)
-        )
+        makeOutline("OutlineTop",    UDim2.fromOffset(0, 0),
+            UDim2.fromOffset(barW, T))
+        makeOutline("OutlineBottom", UDim2.fromOffset(0, barH - T),
+            UDim2.fromOffset(barW, T))
+        makeOutline("OutlineLeft",   UDim2.fromOffset(0, 0),
+            UDim2.fromOffset(T, barH))
+        makeOutline("OutlineRight",  UDim2.fromOffset(barW - T, 0),
+            UDim2.fromOffset(T, barH))
     end
 
-    dl.Font        = resolveFont(cfg.DPS_FONT, cfg.DPS_BOLD)
-    dl.TextWrapped = cfg.DPS_WRAPPED
-    dl.Size        = UDim2.fromOffset(cfg.DPS_LABEL_WIDTH, dl.Size.Y.Offset)
+    -- Corner brackets (8 frames)
+    local cornerFrames = {}
+    if F.CORNER_ENABLED then
+        local CS = dpx(F.CORNER_SIZE)
+        local CT = dpx(F.CORNER_THICKNESS)
+        local CC = F.CORNER_COLOR
+
+        local function makeCorner(name, pos, size)
+            local f = Instance.new("Frame")
+            f.Name            = name
+            f.BackgroundColor3 = CC
+            f.BorderSizePixel = 0
+            f.Position        = pos
+            f.Size            = size
+            f.Parent          = container
+            cornerFrames[#cornerFrames + 1] = f
+        end
+
+        makeCorner("CornerTL_H", UDim2.fromOffset(0, 0), UDim2.fromOffset(CS, CT))
+        makeCorner("CornerTL_V", UDim2.fromOffset(0, 0), UDim2.fromOffset(CT, CS))
+
+        makeCorner("CornerTR_H", UDim2.fromOffset(barW - CS, 0), UDim2.fromOffset(CS, CT))
+        makeCorner("CornerTR_V", UDim2.fromOffset(barW - CT, 0), UDim2.fromOffset(CT, CS))
+
+        makeCorner("CornerBL_H", UDim2.fromOffset(0, barH - CT), UDim2.fromOffset(CS, CT))
+        makeCorner("CornerBL_V", UDim2.fromOffset(0, barH - CS), UDim2.fromOffset(CT, CS))
+
+        makeCorner("CornerBR_H", UDim2.fromOffset(barW - CS, barH - CT), UDim2.fromOffset(CS, CT))
+        makeCorner("CornerBR_V", UDim2.fromOffset(barW - CT, barH - CS), UDim2.fromOffset(CT, CS))
+    end
+
+    -- Number (counter-rotated if bar is vertical so it stays readable)
+    local number
+    if cfg.HB_SHOW_NUMBER then
+        number = Instance.new("TextLabel")
+        number.Name                   = "Number"
+        number.BackgroundTransparency = 1
+        number.Font                   = Enum.Font.GothamBold
+        number.TextScaled             = false
+        number.TextSize               = cfg.HB_NUMBER_SIZE * scale
+        number.TextColor3             = cfg.HB_NUMBER_COLOR
+        number.TextTransparency       = cfg.HB_NUMBER_ALPHA
+        number.TextStrokeTransparency = 0
+        number.TextStrokeColor3       = Color3.fromRGB(0, 0, 0)
+        number.AnchorPoint            = Vector2.new(0.5, 0.5)
+        number.Position               = UDim2.fromScale(0.5, 0.5)
+        number.Size                   = UDim2.fromOffset(barW, barH)
+        number.Rotation               = isVertical and -90 or 0
+        number.Text                   = ""
+        number.ZIndex                 = 10
+        number.Parent                 = container
+    end
+
+    refs.style    = "Figma"
+    refs.Root     = hbRoot
+    refs.Container= container
+    refs.BG       = bg
+    refs.Fill     = fill
+    refs.Dividers = dividers
+    refs.Outlines = outlineFrames
+    refs.Corners  = cornerFrames
+    refs.Number   = number
+    refs.TrackW   = trackW
+    refs.TrackH   = trackH
+    refs.InsetX   = insetX
+    refs.InsetY   = insetY
+    return refs
 end
 
-function SelfHealthbar:_getLowestElementBottom()
+function ESP:_buildHealthbar(parent, cfg, scale)
+    if cfg.HB_STYLE == "Figma" then
+        return self:_buildFigmaBar(parent, cfg, scale)
+    end
+    return self:_buildSimpleBar(parent, cfg, scale)
+end
+
+--------------------------------------------------------------------------------
+-- CREATE / REMOVE
+--------------------------------------------------------------------------------
+function ESP:_createESP(player)
+    if self._objects[player] then return self._objects[player] end
+
     local cfg = self.config
-    local halfW, halfH
-    if cfg.CIRCULAR_ENABLED then
-        halfW, halfH = cfg.CIRCULAR_RADIUS, cfg.CIRCULAR_RADIUS
+
+    local highlight = Instance.new("Highlight")
+    highlight.DepthMode          = Enum.HighlightDepthMode.AlwaysOnTop
+    highlight.FillTransparency   = cfg.HL_BASE_TRANSPARENCY
+    highlight.OutlineTransparency = 0
+    highlight.Enabled            = true
+    highlight.Parent             = CoreGui
+
+    local billboard = Instance.new("BillboardGui")
+    billboard.AlwaysOnTop = true
+    billboard.StudsOffset = cfg.ESP_STUDS_OFFSET
+    billboard.Size        = UDim2.fromOffset(cfg.ESP_NAME_WIDTH, 60)
+
+    local nameLabel = Instance.new("TextLabel")
+    nameLabel.BackgroundTransparency = 1
+    nameLabel.Size                   = UDim2.new(1, 0, 0, cfg.NT_SIZE_BASE + 6)
+    nameLabel.Position               = UDim2.new(0, 0, 0, 0)
+    nameLabel.Font                   = Enum.Font.GothamMedium
+    nameLabel.TextScaled             = false
+    nameLabel.RichText               = true
+    nameLabel.TextStrokeTransparency = 0
+    nameLabel.TextColor3             = Color3.new(1, 1, 1)
+    nameLabel.Text                   = ""
+    nameLabel.Parent                 = billboard
+
+    local subLabel = Instance.new("TextLabel")
+    subLabel.BackgroundTransparency = 1
+    subLabel.Size                   = UDim2.new(1, 0, 0, cfg.NT_SIZE_BASE + 4)
+    subLabel.Position               = UDim2.new(0, 0, 0, cfg.NT_SIZE_BASE + 6)
+    subLabel.Font                   = Enum.Font.GothamMedium
+    subLabel.TextScaled             = false
+    subLabel.RichText               = true
+    subLabel.TextStrokeTransparency = 0
+    subLabel.TextColor3             = Color3.new(1, 1, 1)
+    subLabel.Text                   = ""
+    subLabel.Visible                = (cfg.ESP_NAME_FORMAT == "Vertical")
+    subLabel.Parent                 = billboard
+
+    -- Healthbar (style-specific)
+    local hbRefs = self:_buildHealthbar(billboard, cfg, 1)
+
+    self._objects[player] = {
+        Highlight = highlight,
+        Billboard = billboard,
+        NameLabel = nameLabel,
+        SubLabel  = subLabel,
+        HB        = hbRefs,
+    }
+    return self._objects[player]
+end
+
+function ESP:_removeESP(player)
+    local obj = self._objects[player]
+    if not obj then return end
+    if obj.Highlight then obj.Highlight:Destroy() end
+    if obj.Billboard then obj.Billboard:Destroy() end
+    self._objects[player] = nil
+    self._nameColors[player] = nil
+end
+
+--------------------------------------------------------------------------------
+-- HEALTHBAR UPDATE
+--------------------------------------------------------------------------------
+function ESP:_updateSimpleBar(refs, hp, maxHp, scale, hbAlpha, teamColor)
+    local cfg = self.config
+    if not cfg.HB_ENABLED or not refs.Back then return end
+
+    local pct = math.clamp(hp / math.max(maxHp, 1), 0, 1)
+    local isHorizontal = (cfg.HB_POSITION == "Top" or cfg.HB_POSITION == "Bottom")
+
+    if isHorizontal then
+        refs.Fill.Size        = UDim2.fromScale(pct, 1)
+        refs.Fill.AnchorPoint = Vector2.new(0, 0)
+        refs.Fill.Position    = UDim2.fromScale(0, 0)
     else
-        halfW, halfH = self._barWidthPx / 2, self._barHeightPx / 2
+        refs.Fill.Size        = UDim2.fromScale(1, pct)
+        refs.Fill.AnchorPoint = Vector2.new(0, 1)
+        refs.Fill.Position    = UDim2.fromScale(0, 1)
     end
 
-    local lowest = halfH
+    refs.Fill.BackgroundColor3 = resolveHealthColor(pct, teamColor, cfg, "fill")
 
-    if cfg.TEXT_ENABLED then
-        local _, hpAnchorY, _, hpY = self:_resolveAnchor(
-            cfg.TEXT_POSITION, halfW, halfH, cfg.TEXT_POSITION_GAP
-        )
-        hpY = hpY + (cfg.TEXT_OFFSET_Y or 0)
-        local hpHeight = self._textLabel.Size.Y.Offset
+    if hbAlpha ~= nil then
+        refs.Fill.BackgroundTransparency = hbAlpha
+        refs.Back.BackgroundTransparency = math.clamp(
+            hbAlpha + cfg.HB_BG_EXTRA_TRANSPARENCY, 0, 1)
+    else
+        refs.Fill.BackgroundTransparency = cfg.HB_FILL_TRANSPARENCY
+        refs.Back.BackgroundTransparency = cfg.HB_BG_TRANSPARENCY
+    end
 
-        local hpBottom
-        if hpAnchorY == 1 then
-            hpBottom = hpY
-        elseif hpAnchorY == 0 then
-            hpBottom = hpY + hpHeight
-        else
-            hpBottom = hpY + hpHeight / 2
+    if refs.Number then
+        refs.Number.TextTransparency = hbAlpha ~= nil
+            and math.clamp(hbAlpha + cfg.HB_NUMBER_EXTRA_TRANSPARENCY, 0, 1)
+            or cfg.HB_NUMBER_ALPHA
+        refs.Number.TextColor3 = resolveHealthColor(pct, teamColor, cfg, "text")
+        refs.Number.Text = cfg.HB_NUMBER_SHOW_MAX
+            and string.format("%d/%d", math.floor(hp), math.floor(maxHp))
+            or tostring(math.floor(hp))
+        refs.Number.TextSize = cfg.HB_NUMBER_SIZE * scale
+    end
+end
+
+function ESP:_updateFigmaBar(refs, hp, maxHp, scale, hbAlpha, teamColor)
+    local cfg = self.config
+    if not cfg.HB_ENABLED or not refs.Root then return end
+
+    local pct = math.clamp(hp / math.max(maxHp, 1), 0, 1)
+    local isVertical = (cfg.HB_POSITION == "Left" or cfg.HB_POSITION == "Right")
+
+    -- Fill size: for the Figma style the fill is a horizontal frame
+    -- inside the local (unrotated) container. Rotation is handled by
+    -- the container itself. So we always shrink the fill's X dimension.
+    refs.Fill.Size        = UDim2.new(pct, 0, 1, 0)
+    refs.Fill.AnchorPoint = Vector2.new(0, 0)
+    refs.Fill.Position    = UDim2.fromOffset(refs.InsetX, refs.InsetY)
+
+    -- Wait — the fill was already sized in build. Need to preserve the
+    -- original track dimensions and just scale X.
+    -- Recompute here cleanly:
+    local trackW = refs.TrackW
+    local trackH = refs.TrackH
+    local fillW = math.floor(trackW * pct + 0.5)
+    refs.Fill.Size     = UDim2.fromOffset(fillW, trackH)
+    refs.Fill.Position = UDim2.fromOffset(refs.InsetX, refs.InsetY)
+
+    -- Fill color
+    refs.Fill.BackgroundColor3 = resolveHealthColor(pct, teamColor, cfg, "fill")
+
+    -- Dynamic opacity
+    if hbAlpha ~= nil then
+        refs.Fill.BackgroundTransparency = hbAlpha
+        if refs.BG then
+            refs.BG.BackgroundTransparency = math.clamp(
+                hbAlpha + cfg.HB_BG_EXTRA_TRANSPARENCY, 0, 1)
         end
-        if hpBottom > lowest then lowest = hpBottom end
+    else
+        refs.Fill.BackgroundTransparency = cfg.HB_FILL_TRANSPARENCY
+        if refs.BG then
+            refs.BG.BackgroundTransparency = cfg.HB_FIGMA.BG_TRANSPARENCY
+        end
     end
 
-    if cfg.DPS_ENABLED then
-        local dpsHeight = self._dpsLabel.Size.Y.Offset
-        local dpsBottom
+    -- Dividers share the fill's opacity for a coherent look
+    if refs.Dividers then
+        for _, d in ipairs(refs.Dividers) do
+            d.BackgroundTransparency = refs.BG and refs.BG.BackgroundTransparency or 0
+        end
+    end
+    if refs.Outlines then
+        for _, o in ipairs(refs.Outlines) do
+            o.BackgroundTransparency = refs.Fill.BackgroundTransparency
+        end
+    end
+    if refs.Corners then
+        for _, c in ipairs(refs.Corners) do
+            c.BackgroundTransparency = refs.Fill.BackgroundTransparency
+        end
+    end
 
-        if cfg.DPS_FOLLOW_TEXT and cfg.TEXT_ENABLED then
-            local _, _, _, hpY = self:_resolveAnchor(
-                cfg.TEXT_POSITION, halfW, halfH, cfg.TEXT_POSITION_GAP
-            )
-            hpY = hpY + (cfg.TEXT_OFFSET_Y or 0)
-            local stack = self._textLabel.Size.Y.Offset
-            local dy = cfg.DPS_OFFSET_Y or 0
+    -- Number
+    if refs.Number then
+        refs.Number.TextTransparency = hbAlpha ~= nil
+            and math.clamp(hbAlpha + cfg.HB_NUMBER_EXTRA_TRANSPARENCY, 0, 1)
+            or cfg.HB_NUMBER_ALPHA
+        refs.Number.TextColor3 = resolveHealthColor(pct, teamColor, cfg, "text")
+        refs.Number.Text = cfg.HB_NUMBER_SHOW_MAX
+            and string.format("%d/%d", math.floor(hp), math.floor(maxHp))
+            or tostring(math.floor(hp))
+        refs.Number.TextSize = math.max(4, math.floor(cfg.HB_NUMBER_SIZE * scale + 0.5))
+    end
+end
 
-            if cfg.TEXT_POSITION == "Above" then
-                dpsBottom = hpY - stack + dy
-            else
-                dpsBottom = hpY + stack + dpsHeight + dy
+function ESP:_updateHealthbar(refs, hp, maxHp, scale, hbAlpha, teamColor)
+    if refs.style == "Figma" then
+        self:_updateFigmaBar(refs, hp, maxHp, scale, hbAlpha, teamColor)
+    else
+        self:_updateSimpleBar(refs, hp, maxHp, scale, hbAlpha, teamColor)
+    end
+end
+
+--------------------------------------------------------------------------------
+-- LAYOUT (positioning within BillboardGui)
+--------------------------------------------------------------------------------
+function ESP:_layout(obj, bbW, bbH, textW, textH, nameH, subH, hb, lineSpacing, scale)
+    local cfg = self.config
+    obj.Billboard.Size = UDim2.fromOffset(bbW, bbH)
+
+    -- textX, textY: nametag's anchor position
+    -- hb: { x, y, w, h, centerX, centerY, rotation }
+    local textX, textY
+    local hbCenterX, hbCenterY
+
+    if not hb.enabled then
+        textX = (bbW - textW) * 0.5
+        textY = 0
+    elseif hb.pos == "Top" then
+        hbCenterX = bbW * 0.5
+        hbCenterY = hb.thick * 0.5
+        textX = (bbW - textW) * 0.5
+        textY = hb.thick + hb.gap
+    elseif hb.pos == "Bottom" then
+        textX = (bbW - textW) * 0.5
+        textY = 0
+        hbCenterX = bbW * 0.5
+        hbCenterY = textH + hb.gap + hb.thick * 0.5
+    elseif hb.pos == "Left" then
+        hbCenterX = hb.thick * 0.5
+        hbCenterY = bbH * 0.5
+        textX = hb.thick + hb.gap
+        textY = (bbH - textH) * 0.5
+    else -- Right
+        textX = 0
+        textY = (bbH - textH) * 0.5
+        hbCenterX = textW + hb.gap + hb.thick * 0.5
+        hbCenterY = bbH * 0.5
+    end
+
+    textX = textX + (cfg.NT_OFFSET_X or 0)
+    textY = textY + (cfg.NT_OFFSET_Y or 0)
+
+    local finalNtSize = self._activeNtSize or cfg.NT_SIZE_BASE
+
+    obj.NameLabel.Position = UDim2.fromOffset(textX, textY)
+    obj.NameLabel.Size     = UDim2.new(0, textW, 0, nameH)
+    obj.NameLabel.TextSize = finalNtSize
+
+    obj.SubLabel.Position = UDim2.fromOffset(textX, textY + nameH + (lineSpacing or 0))
+    obj.SubLabel.Size     = UDim2.new(0, textW, 0, subH)
+    obj.SubLabel.TextSize = finalNtSize
+    obj.SubLabel.Visible  = (cfg.ESP_NAME_FORMAT == "Vertical")
+
+    -- Position the healthbar
+    local refs = obj.HB
+    if refs.style == "Figma" then
+        if refs.Root then
+            refs.Root.Visible = hb.enabled
+            refs.Root.Position = UDim2.fromOffset(hbCenterX, hbCenterY)
+            -- Rebuild happens only at create; size scales need updating here
+            -- instead. For simplicity, scale is fixed at build time.
+        end
+    else
+        -- Simple style: position Back, resize
+        if refs.Back then
+            refs.Back.Visible = hb.enabled
+            if hb.enabled then
+                local bx, by, bw, bh
+                if hb.pos == "Top" or hb.pos == "Bottom" then
+                    bw = hb.len
+                    bh = hb.thick
+                    bx = (bbW - bw) * 0.5
+                    by = (hb.pos == "Top") and 0 or (textH + hb.gap)
+                else
+                    bw = hb.thick
+                    bh = hb.len
+                    bx = (hb.pos == "Left") and 0 or (textW + hb.gap)
+                    by = (bbH - bh) * 0.5
+                end
+                refs.Back.Position = UDim2.fromOffset(bx, by)
+                refs.Back.Size     = UDim2.fromOffset(bw, bh)
+
+                if refs.Number then
+                    -- Number position based on config (Inside/Left/Right/Above/Below)
+                    local numW = 80 * scale
+                    local numH = (cfg.HB_NUMBER_SIZE * scale) + 4
+                    local npos
+                    if cfg.HB_NUMBER_POSITION == "Inside" then
+                        refs.Number.Size     = refs.Back.Size
+                        refs.Number.Position = refs.Back.Position
+                    else
+                        -- Basic offsets (kept from original implementation)
+                        npos = UDim2.fromOffset(bx, by)
+                        refs.Number.Size     = UDim2.fromOffset(numW, numH)
+                        refs.Number.Position = npos
+                    end
+                end
             end
-        else
-            local _, dpsAnchorY, _, dpsY = self:_resolveAnchor(
-                cfg.DPS_POSITION, halfW, halfH, cfg.DPS_POSITION_GAP
-            )
-            dpsY = dpsY + (cfg.DPS_OFFSET_Y or 0)
-
-            if dpsAnchorY == 1 then
-                dpsBottom = dpsY
-            elseif dpsAnchorY == 0 then
-                dpsBottom = dpsY + dpsHeight
-            else
-                dpsBottom = dpsY + dpsHeight / 2
-            end
-        end
-        if dpsBottom > lowest then lowest = dpsBottom end
-    end
-
-    return lowest
-end
-
-function SelfHealthbar:_positionViewList()
-    local cfg = self.config
-    if not cfg.VIEWLIST_ENABLED then return end
-
-    local lowestBottom = self:_getLowestElementBottom()
-    local vlTop = lowestBottom + cfg.VIEWLIST_STACK_GAP + (cfg.VIEWLIST_OFFSET_Y or 0)
-
-    local vlWidth = self:_healthbarWidthPx() * cfg.VIEWLIST_WIDTH_MULT
-    local rowCount = math.max(1, #self._viewListRows)
-
-    self._viewListContainer.Position = UDim2.new(
-        0.5, cfg.VIEWLIST_OFFSET_X or 0,
-        0.5, vlTop
-    )
-    self._viewListContainer.Size = UDim2.fromOffset(
-        vlWidth,
-        rowCount * cfg.VIEWLIST_ROW_HEIGHT
-    )
-
-    for i, row in ipairs(self._viewListRows) do
-        row.Position = UDim2.new(0.5, 0, 0, (i - 1) * cfg.VIEWLIST_ROW_HEIGHT)
-    end
-end
-
-function SelfHealthbar:_recomputeBaseSize()
-    local cam = workspace.CurrentCamera
-    local vp = cam and cam.ViewportSize or Vector2.new(1920, 1080)
-    local cfg = self.config
-
-    if cfg.BAR_WIDTH_PX then
-        self._barWidthPx = cfg.BAR_WIDTH_PX
-    else
-        self._barWidthPx = vp.X * cfg.BAR_WIDTH_SCALE
-    end
-    if cfg.BAR_HEIGHT_PX then
-        self._barHeightPx = cfg.BAR_HEIGHT_PX
-    else
-        self._barHeightPx = vp.Y * cfg.BAR_HEIGHT_SCALE
-    end
-
-    self._hudSize = UDim2.fromOffset(
-        self._barWidthPx + cfg.PAD_X * 2,
-        self._barHeightPx + cfg.PAD_TOP + cfg.PAD_BOTTOM
-    )
-
-    self._hud.Size = self._hudSize
-    self._bar.Size = UDim2.fromOffset(self._barWidthPx, self._barHeightPx)
-
-    self:_positionText()
-    self:_positionDps()
-    self:_positionViewList()
-end
-
---------------------------------------------------------------------------------
--- FEEDBACK
---------------------------------------------------------------------------------
-function SelfHealthbar:_spawnIndicator(delta)
-    local cfg = self.config
-    if not cfg.INDICATOR_ENABLED then return end
-    local isDamage = delta < 0
-    local amount = math.abs(delta)
-    if amount < 0.5 then return end
-
-    local side  = isDamage and cfg.INDICATOR_DAMAGE_SIDE or cfg.INDICATOR_HEAL_SIDE
-    local color = isDamage and cfg.INDICATOR_DAMAGE_COLOR or cfg.INDICATOR_HEAL_COLOR
-    local text  = isDamage
-        and string.format("-%d", math.floor(amount + 0.5))
-        or  string.format("+%d", math.floor(amount + 0.5))
-
-    local label = Instance.new("TextLabel")
-    label.Name                   = isDamage and "DmgPopup" or "HealPopup"
-    label.AnchorPoint            = Vector2.new(0.5, 0.5)
-    label.BackgroundTransparency = 1
-    label.Size                   = UDim2.fromOffset(80, 20)
-    label.Font                   = Enum.Font.GothamBold
-    label.TextSize               = cfg.INDICATOR_SIZE
-    label.TextColor3             = color
-    label.TextStrokeTransparency = cfg.INDICATOR_STROKE_TRANSPARENCY
-    label.TextStrokeColor3       = Color3.fromRGB(0, 0, 0)
-    label.Text                   = text
-    label.ZIndex                 = 20
-    label.Parent                 = self._hud
-
-    local startX = cfg.INDICATOR_START_X * side
-    label.Position = UDim2.new(0.5, startX, 0.5, 0)
-
-    local drift = math.random(-cfg.INDICATOR_DRIFT_X, cfg.INDICATOR_DRIFT_X)
-    local peakY = -cfg.INDICATOR_RISE_HEIGHT
-    local endY  = cfg.INDICATOR_FALL_HEIGHT
-
-    TweenService:Create(
-        label,
-        TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
-        { Position = UDim2.new(0.5, startX + drift, 0.5, peakY) }
-    ):Play()
-
-    task.delay(0.35, function()
-        if not label.Parent then return end
-        local t = TweenService:Create(
-            label,
-            TweenInfo.new(
-                cfg.INDICATOR_DURATION - 0.35,
-                Enum.EasingStyle.Quad,
-                Enum.EasingDirection.In
-            ),
-            {
-                Position = UDim2.new(0.5, startX + drift, 0.5, endY),
-                TextTransparency = 1,
-                TextStrokeTransparency = 1,
-            }
-        )
-        t:Play()
-        t.Completed:Connect(function() label:Destroy() end)
-    end)
-end
-
-function SelfHealthbar:_triggerShake(deltaMagnitude)
-    local cfg = self.config
-    if not cfg.SHAKE_ENABLED then return end
-    if self._shakeActive then return end
-
-    local intensity = math.min(
-        cfg.SHAKE_INTENSITY + deltaMagnitude * cfg.SHAKE_INTENSITY_PER_DMG,
-        cfg.SHAKE_MAX
-    )
-    local angle = math.random() * math.pi * 2
-    local dx = math.cos(angle) * intensity
-    local dy = math.sin(angle) * intensity
-
-    self._shakeActive = true
-
-    local t1 = TweenService:Create(
-        self._hud,
-        TweenInfo.new(cfg.SHAKE_DURATION, cfg.SHAKE_STYLE, cfg.SHAKE_DIRECTION),
-        { Position = UDim2.new(0.5, dx, 0.5, dy) }
-    )
-    t1:Play()
-    t1.Completed:Connect(function()
-        local back = TweenService:Create(
-            self._hud,
-            TweenInfo.new(cfg.SHAKE_DURATION * 1.5, cfg.SHAKE_STYLE, cfg.SHAKE_DIRECTION),
-            { Position = UDim2.new(0.5, 0, 0.5, 0) }
-        )
-        back:Play()
-        back.Completed:Connect(function() self._shakeActive = false end)
-    end)
-end
-
-function SelfHealthbar:_triggerPulse(delta, maxHP)
-    local cfg = self.config
-    if not cfg.PULSE_ENABLED then return end
-    if maxHP <= 0 then return end
-
-    local isDamage = delta < 0
-    local amount = math.abs(delta)
-    local factor = isDamage
-        and amount * cfg.PULSE_DAMAGE_PER_HP
-        or  amount * cfg.PULSE_HEAL_PER_HP
-    factor = math.min(factor, cfg.PULSE_MAX)
-    if factor <= 0.001 then return end
-
-    local base = self._hudSize
-    local boosted = UDim2.new(
-        base.X.Scale * (1 + factor), base.X.Offset,
-        base.Y.Scale * (1 + factor), base.Y.Offset
-    )
-
-    local inDuration  = isDamage and cfg.PULSE_IN_DURATION  or cfg.PULSE_HEAL_IN_DURATION
-    local outDuration = isDamage and cfg.PULSE_OUT_DURATION or cfg.PULSE_HEAL_OUT_DURATION
-
-    local inTween = TweenService:Create(
-        self._hud,
-        TweenInfo.new(inDuration, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
-        { Size = boosted }
-    )
-    inTween:Play()
-    inTween.Completed:Connect(function()
-        TweenService:Create(
-            self._hud,
-            TweenInfo.new(outDuration, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut),
-            { Size = base }
-        ):Play()
-    end)
-end
-
---------------------------------------------------------------------------------
--- HEALTH TRACKING
---------------------------------------------------------------------------------
-function SelfHealthbar:_onHealthChanged(newHP, maxHP)
-    if self._lastHealth == nil then
-        self._lastHealth = newHP
-        if self.config.DEBUG_HEALTH then
-            print(("[SelfHealthbar] Initial HP: %.1f / %.1f"):format(newHP, maxHP))
-        end
-        return
-    end
-
-    local delta = newHP - self._lastHealth
-    local old   = self._lastHealth
-    self._lastHealth     = newHP
-    self._lastChangeTime = os.clock()
-    self._lastFullHPTime = nil
-
-    if self.config.DEBUG_HEALTH then
-        print(("[SelfHealthbar] HP %.1f -> %.1f  (delta %+.1f, max %.1f)")
-            :format(old, newHP, delta, maxHP))
-    end
-
-    if math.abs(delta) < 0.01 then return end
-
-    table.insert(self._recentChanges, { t = os.clock(), delta = delta })
-    while #self._recentChanges > self.config.DPS_MAX_EVENTS do
-        table.remove(self._recentChanges, 1)
-    end
-
-    self._currentAlpha = math.min(self._currentAlpha, self.config.OPACITY_MIN + 0.05)
-
-    local cfg = self.config
-    if delta < 0 and cfg.SHAKE_ON_DAMAGE then
-        self:_triggerShake(math.abs(delta))
-    elseif delta > 0 and cfg.SHAKE_ON_HEAL then
-        self:_triggerShake(math.abs(delta))
-    end
-
-    self:_triggerPulse(delta, maxHP)
-    self:_spawnIndicator(delta)
-end
-
-function SelfHealthbar:_hookCharacter(char)
-    if self._charConn then
-        pcall(function() self._charConn:Disconnect() end)
-        self._charConn = nil
-    end
-
-    self._character = char
-    local hum = char:WaitForChild("Humanoid", 10)
-    if not hum then
-        if self.config.DEBUG_HEALTH then
-            warn("[SelfHealthbar] No Humanoid found in character")
-        end
-        return
-    end
-
-    self._humanoid       = hum
-    self._lastHealth     = hum.Health
-    self._recentChanges  = {}
-    self._lastChangeTime = os.clock()
-    self._lastFullHPTime = nil
-
-    if self.config.DEBUG_HEALTH then
-        print(("[SelfHealthbar] Hooked %s — HP %.1f / %.1f")
-            :format(char.Name, hum.Health, hum.MaxHealth))
-    end
-
-    self._charConn = hum.HealthChanged:Connect(function(hp)
-        self:_onHealthChanged(hp, hum.MaxHealth)
-    end)
-end
-
---------------------------------------------------------------------------------
--- DPS/HPS COMPUTATION
---------------------------------------------------------------------------------
-function SelfHealthbar:_computeRate(now)
-    local cfg = self.config
-    local mode = cfg.DPS_MODE
-
-    local keepTime = math.max(cfg.DPS_WINDOW, cfg.DPS_DECAY_TIME)
-    while #self._recentChanges > 0 and now - self._recentChanges[1].t > keepTime do
-        table.remove(self._recentChanges, 1)
-    end
-
-    if mode == "Instant" then
-        if #self._recentChanges == 0 then return 0 end
-        local last = self._recentChanges[#self._recentChanges]
-        local age = now - last.t
-        if age >= cfg.DPS_DECAY_TIME then return 0 end
-        return last.delta * (1 - age / cfg.DPS_DECAY_TIME)
-    end
-
-    if mode == "Weighted" then
-        local sum = 0
-        for _, e in ipairs(self._recentChanges) do
-            local age = now - e.t
-            if age < cfg.DPS_DECAY_TIME then
-                sum = sum + e.delta * (1 - age / cfg.DPS_DECAY_TIME)
-            end
-        end
-        return sum
-    end
-
-    local sum = 0
-    for _, e in ipairs(self._recentChanges) do
-        if now - e.t <= cfg.DPS_WINDOW then sum = sum + e.delta end
-    end
-    return sum / math.max(cfg.DPS_WINDOW, 1)
-end
-
---------------------------------------------------------------------------------
--- VIEW LIST
---------------------------------------------------------------------------------
-function SelfHealthbar:_updateViewList(currentPct)
-    local cfg = self.config
-    if not cfg.VIEWLIST_ENABLED then
-        self._viewListContainer.Visible = false
-        return
-    end
-
-    local bus = getgenv().ModuleBus
-    if not bus or not bus.ViewLines or not bus.ViewLines.Active then
-        self._viewListContainer.Visible = false
-        return
-    end
-
-    -- My position for distance calc
-    local myChar = LocalPlayer.Character
-    local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
-
-    -- Build entry list
-    local entries = {}
-    for _, player in ipairs(Players:GetPlayers()) do
-        if player ~= LocalPlayer then
-            local hit = bus.ViewLines.Hit[player] == true
-            local vis = bus.ViewLines.Visibility[player] or 0
-            local sightSeen = vis >= (cfg.VIEWLIST_SIGHT_THRESHOLD or 0.1)
-
-            -- Distance (math.huge when either side lacks a root)
-            local dist = math.huge
-            local theirChar = player.Character
-            local theirRoot = theirChar and theirChar:FindFirstChild("HumanoidRootPart")
-            if myRoot and theirRoot then
-                dist = (myRoot.Position - theirRoot.Position).Magnitude
-            end
-
-            -- Threat tier: 2=look, 1=sight, 0=idle
-            local threat = 0
-            if hit then threat = 2
-            elseif sightSeen then threat = 1 end
-
-            -- Inclusion
-            local include = false
-            if hit and cfg.VIEWLIST_INCLUDE_LOOK then
-                include = true
-            elseif sightSeen and not hit and cfg.VIEWLIST_INCLUDE_SIGHT then
-                include = true
-            elseif cfg.VIEWLIST_INCLUDE_IDLE
-                and dist <= (cfg.VIEWLIST_IDLE_MAX_DISTANCE or 100)
-            then
-                include = true
-            end
-
-            if include then
-                entries[#entries + 1] = {
-                    player    = player,
-                    hit       = hit,
-                    sightSeen = sightSeen,
-                    vis       = vis,
-                    threat    = threat,
-                    distance  = dist,
-                }
-            end
         end
     end
-
-    -- Sort
-    local sortMode = cfg.VIEWLIST_SORT or "Priority"
-    if sortMode == "Priority" then
-        table.sort(entries, function(a, b)
-            if a.threat ~= b.threat then return a.threat > b.threat end
-            if a.distance ~= b.distance then return a.distance < b.distance end
-            return a.player.Name:lower() < b.player.Name:lower()
-        end)
-    elseif sortMode == "Threat" then
-        table.sort(entries, function(a, b)
-            if a.hit ~= b.hit then return a.hit end
-            if a.vis ~= b.vis then return a.vis > b.vis end
-            return a.player.Name:lower() < b.player.Name:lower()
-        end)
-    elseif sortMode == "Distance" then
-        table.sort(entries, function(a, b)
-            return a.distance < b.distance
-        end)
-    elseif sortMode == "Alpha" then
-        table.sort(entries, function(a, b)
-            return a.player.Name:lower() < b.player.Name:lower()
-        end)
-    elseif sortMode == "Team" then
-        table.sort(entries, function(a, b)
-            local ta = a.player.Team and a.player.Team.Name or ""
-            local tb = b.player.Team and b.player.Team.Name or ""
-            if ta ~= tb then return ta < tb end
-            return a.player.Name:lower() < b.player.Name:lower()
-        end)
-    end
-
-    -- Cap
-    while #entries > cfg.VIEWLIST_MAX_ROWS do
-        table.remove(entries)
-    end
-
-    -- Empty state
-    if #entries == 0 then
-        if cfg.VIEWLIST_EMPTY_TEXT == "" then
-            self._viewListContainer.Visible = false
-        else
-            self._viewListContainer.Visible = true
-            self._viewListEmpty.Visible = true
-            self._viewListEmpty.Text      = cfg.VIEWLIST_EMPTY_TEXT
-            self._viewListEmpty.TextColor3 = cfg.VIEWLIST_EMPTY_COLOR
-            self._viewListEmpty.TextSize   = cfg.VIEWLIST_SIZE_SIGHT
-            for _, row in ipairs(self._viewListRows) do row.Visible = false end
-            self:_positionViewList()
-        end
-        return
-    end
-
-    self._viewListContainer.Visible = true
-    self._viewListEmpty.Visible = false
-
-    self:_ensureViewListRow(#entries)
-
-    for i, entry in ipairs(entries) do
-        local row = self._viewListRows[i]
-        row.Visible = true
-        row.Text    = self:_formatPlayerName(entry.player)
-
-        -- ─── Size / font / transparency by threat tier ─────────────
-        if entry.hit then
-            row.TextSize         = cfg.VIEWLIST_SIZE_LOOK
-            row.Font             = cfg.VIEWLIST_BOLD_ON_LOOK
-                                    and resolveFont(Enum.Font.Gotham, true)
-                                    or  Enum.Font.Gotham
-            row.TextTransparency = cfg.VIEWLIST_ALPHA_LOOK
-        elseif entry.sightSeen then
-            row.TextSize         = cfg.VIEWLIST_SIZE_SIGHT
-            row.Font             = Enum.Font.Gotham
-            row.TextTransparency = cfg.VIEWLIST_ALPHA_SIGHT
-        else -- idle
-            row.TextSize         = cfg.VIEWLIST_SIZE_IDLE
-            row.Font             = Enum.Font.Gotham
-            row.TextTransparency = cfg.VIEWLIST_ALPHA_BASE
-        end
-
-        -- ─── Color mode ────────────────────────────────────────────
-        local color
-        if cfg.VIEWLIST_COLOR_MODE == "Fixed" then
-            color = cfg.VIEWLIST_FIXED_COLOR
-        elseif cfg.VIEWLIST_COLOR_MODE == "Healthbar" then
-            color = self:_resolveFillColor(currentPct)
-        else -- "Team"
-            color = self:_getPlayerTeamColor(entry.player)
-                or Color3.fromRGB(255, 255, 255)
-        end
-
-        -- ─── Proximity override (fires regardless of mode) ─────────
-        if cfg.VIEWLIST_PROXIMITY_ENABLED
-            and entry.distance < (cfg.VIEWLIST_PROXIMITY_DISTANCE or 100)
-        then
-            -- t = 0 at 0 studs (red), t = 1 at threshold (orange)
-            local t = clamp(entry.distance / cfg.VIEWLIST_PROXIMITY_DISTANCE, 0, 1)
-            color = cfg.VIEWLIST_PROXIMITY_NEAR_COLOR:Lerp(
-                cfg.VIEWLIST_PROXIMITY_FAR_COLOR, t
-            )
-        end
-
-        row.TextColor3 = color
-    end
-
-    -- Hide unused rows
-    for i = #entries + 1, #self._viewListRows do
-        self._viewListRows[i].Visible = false
-    end
-
-    self:_positionViewList()
 end
 
 --------------------------------------------------------------------------------
 -- PUBLIC: update
 --------------------------------------------------------------------------------
-function SelfHealthbar:update()
-    local now = os.clock()
-    local hum = self._humanoid
+function ESP:update()
     local cfg = self.config
 
-    if not hum or hum.Health <= 0 then
-        self._hud.GroupTransparency = 1
+    if not cfg.ESPEnabled then
+        for _, obj in pairs(self._objects) do
+            obj.Highlight.Enabled = false
+            obj.Billboard.Enabled = false
+        end
         return
     end
 
-    local hp    = hum.Health
-    local maxHP = math.max(hum.MaxHealth, 1)
-    local pct   = clamp(hp / maxHP, 0, 1)
+    local myChar = LocalPlayer.Character
+    local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+    if not myRoot then return end
 
-    -- Progression
-    local mode = cfg.PROGRESSION
-    if mode == "Both" then
-        self._bar.AnchorPoint = Vector2.new(0.5, 0.5)
-        self._bar.Position    = UDim2.new(0.5, 0, 0.5, 0)
-    elseif mode == "Right" then
-        self._bar.AnchorPoint = Vector2.new(0, 0.5)
-        self._bar.Position    = UDim2.new(0.5, -self._barWidthPx / 2, 0.5, 0)
-    elseif mode == "Left" then
-        self._bar.AnchorPoint = Vector2.new(1, 0.5)
-        self._bar.Position    = UDim2.new(0.5, self._barWidthPx / 2, 0.5, 0)
-    end
+    local barShowsNumber = cfg.HB_ENABLED and cfg.HB_SHOW_NUMBER
+    local showHpInNametag = not (cfg.NT_HIDE_HP_IF_BAR_TEXT and barShowsNumber)
 
-    -- Fill / ring
-    if cfg.CIRCULAR_ENABLED then
-        local N = cfg.CIRCULAR_SEGMENTS
-        local litCount = math.floor(N * pct + 0.5)
-        local fillColor = self:_resolveFillColor(pct)
-        for i, seg in ipairs(self._ringSegments) do
-            if i <= litCount then
-                seg.BackgroundColor3       = fillColor
-                seg.BackgroundTransparency = 0
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            local char = player.Character
+            local root = char and char:FindFirstChild("HumanoidRootPart")
+
+            if char and root then
+                local obj = self:_createESP(player)
+                local dist = math.floor((myRoot.Position - root.Position).Magnitude)
+
+                local withinRange = true
+                if cfg.ESPUseDistanceLimit then
+                    withinRange = dist <= cfg.ESPMaxDistance
+                end
+
+                local hit, vis = self:_getViewLinesState(player)
+                local sightSeen = cfg.INTEGRATION_ENABLED
+                    and vis >= cfg.SIGHT_THRESHOLD
+
+                local fillT
+                if cfg.INTEGRATION_ENABLED then
+                    if hit then fillT = cfg.HL_LOOK_TRANSPARENCY
+                    elseif sightSeen then fillT = cfg.HL_SIGHT_TRANSPARENCY
+                    else fillT = cfg.HL_BASE_TRANSPARENCY end
+                else
+                    fillT = cfg.HL_BASE_TRANSPARENCY
+                end
+
+                local ntAlpha, hbAlpha = self:_resolveAlphas(hit, sightSeen, root.Position)
+
+                local ntSize
+                if cfg.INTEGRATION_ENABLED then
+                    if hit then ntSize = cfg.NT_SIZE_LOOK
+                    elseif sightSeen then ntSize = cfg.NT_SIZE_SIGHT
+                    else ntSize = cfg.NT_SIZE_BASE end
+                else
+                    ntSize = cfg.NT_SIZE_BASE
+                end
+                self._activeNtSize = ntSize
+
+                local ntFont = Enum.Font.GothamMedium
+                if cfg.INTEGRATION_ENABLED and cfg.NT_BOLD_ON_LOOK and hit then
+                    ntFont = Enum.Font.GothamBold
+                end
+
+                local hp    = math.floor(self:_getHealth(char))
+                local maxHp = self:_getMaxHealth(char)
+                local nameColor = self:_getNameColor(player)
+                local teamColor = getTeamColor(player)
+                local hpColor   = healthColor(hp)
+                local distColor = distanceColor(dist)
+
+                local scale = self:_computeScreenScale(char, root)
+
+                local bbW, bbH, textW, textH, nameH, subH, hb, lineSpacing =
+                    self:_computeLayout(scale)
+                self:_layout(obj, bbW, bbH, textW, textH, nameH, subH, hb, lineSpacing, scale)
+
+                if self._espVisible and withinRange then
+                    obj.Highlight.Adornee          = char
+                    obj.Highlight.Enabled          = true
+                    obj.Highlight.FillColor        = nameColor
+                    obj.Highlight.OutlineColor     = nameColor
+                    obj.Highlight.FillTransparency = fillT
+                else
+                    obj.Highlight.Enabled = false
+                    obj.Highlight.Adornee = nil
+                end
+
+                if self._textVisible and cfg.ESPShowText then
+                    local anchorPart = char:FindFirstChild(cfg.ESP_ANCHOR_PART) or root
+                    obj.Billboard.Parent  = anchorPart
+                    obj.Billboard.Enabled = true
+
+                    obj.NameLabel.Font             = ntFont
+                    obj.NameLabel.TextColor3       = nameColor
+                    obj.NameLabel.TextTransparency = ntAlpha
+
+                    obj.SubLabel.Font             = ntFont
+                    obj.SubLabel.TextColor3       = nameColor
+                    obj.SubLabel.TextTransparency = ntAlpha
+
+                    if cfg.ESP_NAME_FORMAT == "Vertical" then
+                        obj.NameLabel.Text = player.DisplayName
+                        if showHpInNametag then
+                            obj.SubLabel.Text = string.format(
+                                '<font color="%s">%d</font> | <font color="%s">%d</font>',
+                                rgb(hpColor), hp, rgb(distColor), dist)
+                        else
+                            obj.SubLabel.Text = string.format(
+                                '<font color="%s">%d</font>', rgb(distColor), dist)
+                        end
+                    else
+                        obj.NameLabel.Text = string.format(
+                            '<font color="%s">%s</font> | <font color="%s">%d</font> | <font color="%s">%d</font>',
+                            rgb(nameColor), player.DisplayName,
+                            rgb(hpColor), hp, rgb(distColor), dist)
+                        obj.SubLabel.Text = ""
+                    end
+
+                    self:_updateHealthbar(obj.HB, hp, maxHp, scale, hbAlpha, teamColor)
+                else
+                    obj.Billboard.Parent = nil
+                end
             else
-                seg.BackgroundColor3       = cfg.CIRCULAR_UNFILLED_COLOR
-                seg.BackgroundTransparency = cfg.CIRCULAR_UNFILLED_TRANSPARENCY
+                self:_removeESP(player)
             end
         end
-    else
-        self._bar.Size = UDim2.fromOffset(self._barWidthPx * pct, self._barHeightPx)
-        local fillColor = self:_resolveFillColor(pct)
-        self._bar.BackgroundColor3 = fillColor
-        self._stroke.Color         = self:_resolveBorderColor(pct, fillColor)
     end
-
-    -- HP text
-    if cfg.TEXT_ENABLED then
-        local tl = self._textLabel
-        tl.Visible = true
-        tl.Text    = self:_formatText(hp, maxHP, pct)
-
-        local fillC = cfg.TEXT_COLOR_AUTO and self:_autoFillColor(pct) or cfg.TEXT_COLOR
-        tl.TextColor3 = fillC
-
-        local strokeC = cfg.TEXT_STROKE_COLOR_AUTO and fillC or cfg.TEXT_STROKE_COLOR
-        if self._textUIStroke then
-            self._textUIStroke.Color = strokeC
-        else
-            tl.TextStrokeColor3 = strokeC
-        end
-    else
-        self._textLabel.Visible = false
-    end
-
-    -- DPS/HPS
-    if cfg.DPS_ENABLED then
-        local rate = self:_computeRate(now)
-        local rounded = math.floor(math.abs(rate) * 10 + 0.5) / 10
-        if rounded < cfg.DPS_THRESHOLD then
-            self._dpsLabel.Visible = false
-        else
-            self._dpsLabel.Visible = true
-            if rate < 0 then
-                self._dpsLabel.Text       = string.format("%.1f DPS", rounded)
-                self._dpsLabel.TextColor3 = cfg.DPS_DAMAGE_COLOR
-            else
-                self._dpsLabel.Text       = string.format("%.1f HPS", rounded)
-                self._dpsLabel.TextColor3 = cfg.DPS_HEAL_COLOR
-            end
-        end
-    else
-        self._dpsLabel.Visible = false
-    end
-
-    -- View list
-    self:_updateViewList(pct)
-
-    -- Dynamic opacity
-    if cfg.ALWAYS_VISIBLE then
-        self._hud.GroupTransparency = cfg.ALWAYS_VISIBLE_ALPHA
-    elseif cfg.OPACITY_ENABLED then
-        local targetAlpha
-        if pct >= 0.999 then
-            if not self._lastFullHPTime then self._lastFullHPTime = now end
-            if now - self._lastFullHPTime > cfg.OPACITY_FULL_HP_DELAY then
-                targetAlpha = cfg.OPACITY_FULL_HP_TRANSPARENCY
-            else
-                targetAlpha = cfg.OPACITY_MIN
-            end
-        else
-            self._lastFullHPTime = nil
-            local idle = now - self._lastChangeTime
-            if idle < cfg.OPACITY_IDLE_FADE_START then
-                targetAlpha = cfg.OPACITY_MIN
-            else
-                local span = math.max(
-                    cfg.OPACITY_IDLE_FADE_END - cfg.OPACITY_IDLE_FADE_START,
-                    1e-3
-                )
-                local prog = clamp((idle - cfg.OPACITY_IDLE_FADE_START) / span, 0, 1)
-                targetAlpha = lerp(cfg.OPACITY_MIN, cfg.OPACITY_MAX_IDLE_FADE, prog)
-            end
-        end
-
-        local dt = self._lastDt or (1 / 60)
-        local rate = (targetAlpha < self._currentAlpha)
-            and cfg.OPACITY_FADE_IN_RATE
-            or  cfg.OPACITY_FADE_OUT_RATE
-        self._currentAlpha = self._currentAlpha
-            + (targetAlpha - self._currentAlpha) * math.min(dt * rate, 1)
-        self._hud.GroupTransparency = clamp(self._currentAlpha, 0, 1)
-    else
-        self._hud.GroupTransparency = 0
-    end
-end
-
-function SelfHealthbar:_tick()
-    local now = os.clock()
-    self._lastDt   = now - (self._lastTick or now)
-    self._lastTick = now
-
-    local cfg = self.config
-    if cfg.UPDATE_INTERVAL > 0 then
-        if now - self._lastUpdate < cfg.UPDATE_INTERVAL then return end
-        self._lastUpdate = now
-    end
-
-    self:update()
 end
 
 --------------------------------------------------------------------------------
 -- PUBLIC: lifecycle
 --------------------------------------------------------------------------------
-function SelfHealthbar:start()
+function ESP:start()
     if self._running then return end
     self._running = true
-    self._lastTick = os.clock()
-
-    self:_track(UserInputService.InputChanged:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseMovement then
-            if not self.config.FOLLOW_CURSOR then return end
-            self._root.Position = UDim2.new(
-                0, input.Position.X + self.config.CURSOR_OFFSET_X,
-                0, input.Position.Y + self.config.CURSOR_OFFSET_Y
-            )
-        end
-    end))
-
-    local m = UserInputService:GetMouseLocation()
-    self._root.Position = UDim2.new(
-        0, m.X + self.config.CURSOR_OFFSET_X,
-        0, m.Y + self.config.CURSOR_OFFSET_Y
-    )
-
-    if LocalPlayer.Character then
-        self:_hookCharacter(LocalPlayer.Character)
-    end
-    self:_track(LocalPlayer.CharacterAdded:Connect(function(char)
-        self:_hookCharacter(char)
-    end))
-
-    self:_track(workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
-        self:_recomputeBaseSize()
-    end))
 
     self:_track(RunService.RenderStepped:Connect(function()
-        if not self._running then return end
-        self:_tick()
+        local cfg = self.config
+        if cfg.UPDATE_INTERVAL > 0 then
+            local now = os.clock()
+            if now - self._lastUpdate < cfg.UPDATE_INTERVAL then return end
+            self._lastUpdate = now
+        end
+        self:update()
     end))
 
-    if self.config.KILL_KEYBIND then
-        self:_track(UserInputService.InputBegan:Connect(function(input, gp)
-            if gp then return end
-            if input.KeyCode == self.config.KILL_KEYBIND then
-                self:stop()
-            end
-        end))
-    end
+    self:_track(Players.PlayerRemoving:Connect(function(player)
+        self:_removeESP(player)
+    end))
+
+    self:_track(UserInputService.InputBegan:Connect(function(input, gp)
+        if gp then return end
+        if UserInputService:GetFocusedTextBox() then return end
+        if input.KeyCode == Enum.KeyCode.L then
+            self._espVisible = not self._espVisible
+        elseif input.KeyCode == Enum.KeyCode.P then
+            self._textVisible = not self._textVisible
+        end
+    end))
 end
 
-function SelfHealthbar:stop()
+function ESP:stop()
     if not self._running then return end
     self._running = false
 
@@ -1448,45 +1154,35 @@ function SelfHealthbar:stop()
     end
     self._connections = {}
 
-    if self._charConn then
-        pcall(function() self._charConn:Disconnect() end)
-        self._charConn = nil
-    end
-
-    if self._gui then
-        pcall(function() self._gui:Destroy() end)
-        self._gui = nil
+    for player in pairs(self._objects) do
+        pcall(function() self:_removeESP(player) end)
     end
 end
 
-function SelfHealthbar:destroy()
+function ESP:destroy()
     self:stop()
 end
 
-function SelfHealthbar:setConfig(partial)
+function ESP:setConfig(partial)
     if not partial then return end
-    local circularChanged = false
-
     for k, v in pairs(partial) do
-        self.config[k] = v
-        if k == "CIRCULAR_ENABLED" or k == "CIRCULAR_RADIUS"
-            or k == "CIRCULAR_SEGMENTS" or k == "CIRCULAR_SEG_WIDTH"
-            or k == "CIRCULAR_SEG_OVERLAP" or k == "CIRCULAR_ROUND_ENDS"
-            or k == "CIRCULAR_START_ANGLE" or k == "CIRCULAR_CLOCKWISE"
-        then
-            circularChanged = true
+        if k == "HB_FIGMA" and type(v) == "table" then
+            for kk, vv in pairs(v) do
+                self.config.HB_FIGMA[kk] = vv
+            end
+        else
+            self.config[k] = v
         end
     end
-
-    if circularChanged then
-        self:_rebuildCircular()
+    if partial.ESPWhitelist or partial.ESPBlacklist
+        or partial.ESPFriendColor ~= nil or partial.ESPUseTeamColor ~= nil
+    then
+        self._nameColors = {}
     end
-
-    self:_recomputeBaseSize()
 end
 
-function SelfHealthbar:isRunning()
+function ESP:isRunning()
     return self._running
 end
 
-return SelfHealthbar
+return ESP
