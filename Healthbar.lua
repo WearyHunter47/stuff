@@ -206,6 +206,13 @@ local DEFAULTS = {
     VIEWLIST_ALPHA_SIGHT     = 0.30,
     VIEWLIST_ALPHA_LOOK      = 0.00,
 
+    VIEWLIST_OPACITY_MODE          = "Threat",
+    VIEWLIST_OPACITY_STATIC        = 0.3,
+    VIEWLIST_OPACITY_FLOOR         = 0.4,
+    VIEWLIST_OPACITY_THREAT_LOOK   = 0.0,
+    VIEWLIST_OPACITY_THREAT_SIGHT  = 0.3,
+    VIEWLIST_OPACITY_THREAT_IDLE   = 0.6,
+    
     VIEWLIST_PROXIMITY_ENABLED    = true,
     VIEWLIST_PROXIMITY_DISTANCE   = 100,
     VIEWLIST_PROXIMITY_NEAR_COLOR = Color3.fromRGB(255, 30, 30),
@@ -270,6 +277,7 @@ function SelfHealthbar.new(overrides)
     self._shakeActive    = false
     self._ringSegments   = {}
     self._viewListRows   = {}
+    self._viewListHighestThreat  = 0
     self._lastUpdate     = 0
     self._lastDt         = 1 / 60
     self._lastTick       = os.clock()
@@ -1183,7 +1191,10 @@ function SelfHealthbar:_updateViewList(currentPct)
     self._viewListEmpty.Visible = false
 
     self:_ensureViewListRow(#entries)
-
+    -- Record the highest threat in this frame's list so update() can
+    -- compute the list's own opacity without re-scanning.
+    self._viewListHighestThreat = entries[1].threat or 0
+    
     for i, entry in ipairs(entries) do
         local row = self._viewListRows[i]
         row.Visible = true
@@ -1375,8 +1386,30 @@ function SelfHealthbar:update()
     end
 
     self._hud.GroupTransparency = finalHudAlpha
+
+    -- ─── View list opacity (decoupled from HUD) ────────────────────────
     if self._viewListContainer then
-        self._viewListContainer.GroupTransparency = finalHudAlpha
+        local vlAlpha
+        local mode = cfg.VIEWLIST_OPACITY_MODE or "Follow"
+
+        if mode == "Independent" then
+            vlAlpha = cfg.VIEWLIST_OPACITY_STATIC
+        elseif mode == "Floor" then
+            vlAlpha = math.min(finalHudAlpha, cfg.VIEWLIST_OPACITY_FLOOR)
+        elseif mode == "Threat" then
+            local threat = self._viewListHighestThreat or 0
+            if threat >= 2 then
+                vlAlpha = cfg.VIEWLIST_OPACITY_THREAT_LOOK
+            elseif threat == 1 then
+                vlAlpha = cfg.VIEWLIST_OPACITY_THREAT_SIGHT
+            else
+                vlAlpha = cfg.VIEWLIST_OPACITY_THREAT_IDLE
+            end
+        else
+            vlAlpha = finalHudAlpha
+        end
+
+        self._viewListContainer.GroupTransparency = vlAlpha
     end
 end
 
