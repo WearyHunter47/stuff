@@ -701,7 +701,7 @@ function ESP:_createESP(player)
     local highlight = Instance.new("Highlight")
     highlight.DepthMode          = Enum.HighlightDepthMode.AlwaysOnTop
     highlight.FillTransparency   = cfg.HL_BASE_TRANSPARENCY
-    highlight.OutlineTransparency = 0
+    highlight.OutlineTransparency = cfg.HL_OUTLINE_TRANSPARENCY or 0.4
     highlight.Enabled            = true
     highlight.Parent             = CoreGui
 
@@ -1055,13 +1055,27 @@ function ESP:update()
                 local bbW, bbH, textW, textH, nameH, subH, hb, lineSpacing =
                     self:_computeLayout(scale)
                 self:_layout(obj, bbW, bbH, textW, textH, nameH, subH, hb, lineSpacing, scale)
+                -- Outline transparency: static or dynamic based on config
+                local outlineT
+                if cfg.HL_OUTLINE_DYNAMIC and cfg.INTEGRATION_ENABLED then
+                    if hit then
+                        outlineT = cfg.HL_OUTLINE_LOOK_TRANSPARENCY
+                    elseif sightSeen then
+                        outlineT = cfg.HL_OUTLINE_SIGHT_TRANSPARENCY
+                    else
+                        outlineT = cfg.HL_OUTLINE_TRANSPARENCY
+                    end
+                else
+                    outlineT = cfg.HL_OUTLINE_TRANSPARENCY
+                end
 
                 if self._espVisible and withinRange then
-                    obj.Highlight.Adornee          = char
-                    obj.Highlight.Enabled          = true
-                    obj.Highlight.FillColor        = nameColor
-                    obj.Highlight.OutlineColor     = nameColor
-                    obj.Highlight.FillTransparency = fillT
+                    obj.Highlight.Adornee              = char
+                    obj.Highlight.Enabled              = true
+                    obj.Highlight.FillColor            = nameColor
+                    obj.Highlight.OutlineColor         = nameColor
+                    obj.Highlight.FillTransparency     = fillT
+                    obj.Highlight.OutlineTransparency  = outlineT
                 else
                     obj.Highlight.Enabled = false
                     obj.Highlight.Adornee = nil
