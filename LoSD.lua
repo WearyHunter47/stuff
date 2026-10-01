@@ -6,10 +6,10 @@
     Vision cones:
       • 2D: fan of rectangular strips forming a triangle on the ground
       • 3D: radial spoke envelope forming a cone volume
-      • Optional per-cone Highlight
+      • Color reflects cone presence (in FOV + in range + LOS), not the
+        narrow look-beam hit, so the color matches the visual volume
       • Team colors, inverse hit color, in-house fallback
       • Priority selection by distance (max 8 by default)
-      • Optional terrain conform (pitch only)
 
     Uses plain Parts only — no SpecialMesh — for compatibility with
     executors that don't render Prism/Pyramid meshes.
@@ -89,14 +89,13 @@ local DEFAULTS = {
     EDGE_NAME_ALPHA_VIEWED    = 0.0,
     EDGE_NAME_SIGHT_THRESHOLD = 0.1,
 
-    -- Vision cones
     VISION_CONE_ENABLED          = true,
-    VISION_CONE_MODE             = "2D",        -- "2D" | "3D" | "Both"
+    VISION_CONE_MODE             = "2D",
     VISION_CONE_MAX_PLAYERS      = 8,
     VISION_CONE_RANGE            = 20,
     VISION_CONE_ACTIVATION_RANGE = 150,
 
-    VISION_CONE_COLOR_MODE       = "Team",      -- "Team" | "Fixed"
+    VISION_CONE_COLOR_MODE       = "Team",
     VISION_CONE_FIXED_COLOR      = Color3.fromRGB(255, 200, 80),
     VISION_CONE_USE_FIXED_HIT    = false,
     VISION_CONE_FIXED_HIT_COLOR  = Color3.fromRGB(255, 60, 60),
@@ -111,25 +110,29 @@ local DEFAULTS = {
     VISION_CONE_GROUND_OFFSET    = 0.05,
 
     VISION_CONE_CONFORM_TERRAIN  = false,
-    VISION_CONE_CONFORM_RAYS     = 2,
 
     VISION_CONE_TILT_FADE        = true,
     VISION_CONE_OCCLUDE_ENABLED  = true,
     VISION_CONE_OCCLUDE_THRESHOLD = 0.85,
     VISION_CONE_OCCLUDE_MIN_ALPHA = 0.9,
 
-    -- 2D fan geometry
     VISION_CONE_STRIP_COUNT      = 16,
     VISION_CONE_STRIP_THICKNESS  = 0.08,
     VISION_CONE_STRIP_OVERLAP    = 1.25,
 
-    -- 3D spoke envelope geometry
     VISION_CONE_SPOKE_COUNT      = 24,
     VISION_CONE_SPOKE_THICKNESS  = 0.06,
 
-    -- Material for cone parts. Neon is bright; try Glass or SmoothPlastic
-    -- for a subtler look.
     VISION_CONE_MATERIAL         = Enum.Material.Neon,
+
+    -- Determines how cone presence is computed.
+    --   "AnySample"  : any single sample point inside the cone counts
+    --   "MajorityOf" : more than 50% of samples must be inside
+    --   "All"        : every sample must be inside
+    VISION_CONE_PRESENCE_MODE    = "AnySample",
+
+    -- Require clear line of sight (raycast) for cone presence
+    VISION_CONE_REQUIRE_LOS      = true,
 }
 
 --------------------------------------------------------------------------------
@@ -513,6 +516,52 @@ function ViewLines:_publishClearAll()
 end
 
 --------------------------------------------------------------------------------
+-- VISION CONE PRESENCE CHECK
+--------------------------------------------------------------------------------
+-- Determines if the local player is inside the cone volume defined by
+-- viewerHead position, FOV_DEGREES, and VISION_CONE_RANGE. Uses the same
+-- sample-point test as _evaluateVisibility but caps the range to the
+-- cone's own reach, so the visual cone and its color state stay in sync.
+function ViewLines:_amIInVisionCone(viewerChar, viewerHead, myChar, mySamples)
+    local cfg = self.config
+    if #mySamples == 0 then return false end
+
+    local eye, look = eyeOf(viewerHead)
+    local params = self:_rayParams(viewerChar)
+    local cosHalf = math.cos(math.rad(cfg.FOV_DEGREES * 0.5))
+    local maxRange = cfg.VISION_CONE_RANGE
+    local requireLoS = cfg.VISION_CONE_REQUIRE_LOS
+
+    local hits = 0
+    for _, s in ipairs(mySamples) do
+        local toSample = s.pos - eye
+        local dist = toSample.Magnitude
+        if dist > 0.001 and dist <= maxRange then
+            local dir = toSample / dist
+            if look:Dot(dir) >= cosHalf then
+                if not requireLoS then
+                    hits += 1
+                else
+                    local res = workspace:Raycast(eye, toSample, params)
+                    if res == nil or res.Instance:IsDescendantOf(myChar) then
+                        hits += 1
+                    end
+                end
+            end
+        end
+    end
+
+    local mode = cfg.VISION_CONE_PRESENCE_MODE or "AnySample"
+    if mode == "All" then
+        return hits == #mySamples
+    elseif mode == "MajorityOf" then
+        return hits > (#mySamples * 0.5)
+    else -- "AnySample"
+        return hits > 0
+    end
+end
+
+--------------------------------------------------------------------------------
 -- VISION CONES
 --------------------------------------------------------------------------------
 function ViewLines:_destroyVisionCone(player)
@@ -538,7 +587,6 @@ function ViewLines:_createVisionCone(player)
 
     local material = cfg.VISION_CONE_MATERIAL or Enum.Material.Neon
 
-    -- ─── 2D fan ────────────────────────────────────────────────────────
     if cfg.VISION_CONE_MODE == "2D" or cfg.VISION_CONE_MODE == "Both" then
         for i = 1, cfg.VISION_CONE_STRIP_COUNT do
             local p = Instance.new("Part")
@@ -558,7 +606,6 @@ function ViewLines:_createVisionCone(player)
         end
     end
 
-    -- ─── 3D spoke envelope ─────────────────────────────────────────────
     if cfg.VISION_CONE_MODE == "3D" or cfg.VISION_CONE_MODE == "Both" then
         for i = 1, cfg.VISION_CONE_SPOKE_COUNT do
             local p = Instance.new("Part")
@@ -596,7 +643,6 @@ function ViewLines:_createVisionCone(player)
         vc.highlight = hl
     end
 
-    -- Cache for dirty-checking
     vc.lastApex = nil
     vc.lastFlat = nil
     vc.lastRange = nil
@@ -606,7 +652,7 @@ function ViewLines:_createVisionCone(player)
     return vc
 end
 
-function ViewLines:_resolveConeColor(player, hit)
+function ViewLines:_resolveConeColor(player, inCone)
     local cfg = self.config
     local base
 
@@ -616,7 +662,7 @@ function ViewLines:_resolveConeColor(player, hit)
         base = getTeamColorOf(player) or cfg.VISION_CONE_FIXED_COLOR
     end
 
-    if hit then
+    if inCone then
         if cfg.VISION_CONE_USE_FIXED_HIT then
             return cfg.VISION_CONE_FIXED_HIT_COLOR
         else
@@ -646,7 +692,7 @@ function ViewLines:_coneOcclusionAlpha(baseAlpha, worldPos)
     return clamp(baseAlpha + (minA - baseAlpha) * factor, 0, 1)
 end
 
-function ViewLines:_updateVisionCone(player, entry, hit)
+function ViewLines:_updateVisionCone(player, entry, inCone)
     local cfg = self.config
     if not cfg.VISION_CONE_ENABLED then return end
     if not entry or not entry.viewerHead or not entry.viewerHead.Parent then return end
@@ -672,11 +718,7 @@ function ViewLines:_updateVisionCone(player, entry, hit)
     )
 
     local halfFov = math.rad((cfg.FOV_DEGREES or 90) * 0.5)
-    local baseWidth = 2 * cfg.VISION_CONE_RANGE * math.tan(halfFov)
 
-    -- Dirty check: skip the CFrame writes if nothing moved meaningfully.
-    -- Position tolerance 0.1 studs, direction tolerance 0.01, geometry
-    -- changes force a rewrite.
     local moved = true
     if vc.lastApex and vc.lastFlat then
         if (apexPos - vc.lastApex).Magnitude < 0.1
@@ -688,9 +730,6 @@ function ViewLines:_updateVisionCone(player, entry, hit)
         end
     end
 
-    -- Even if geometry is stationary, we still need to refresh colors
-    -- and transparency so the hit state can update. Those are cheap writes
-    -- compared to the CFrame math, so we do them every frame regardless.
     local up = Vector3.new(0, 1, 0)
     local right = flat:Cross(up)
     if right.Magnitude < 0.1 then right = Vector3.new(1, 0, 0) end
@@ -701,23 +740,20 @@ function ViewLines:_updateVisionCone(player, entry, hit)
         tiltAlpha = clamp(1 - math.abs(look.Y), 0, 1)
     end
 
-    local baseColor = self:_resolveConeColor(player, hit)
+    local baseColor = self:_resolveConeColor(player, inCone)
 
-    -- Occlusion uses the apex as the reference point so the entire cone
-    -- fades uniformly when the camera looks at the owner's head.
     local occAlpha2D = self:_coneOcclusionAlpha(
-        (hit and cfg.VISION_CONE_HIT_ALPHA_2D or cfg.VISION_CONE_ALPHA_2D),
+        (inCone and cfg.VISION_CONE_HIT_ALPHA_2D or cfg.VISION_CONE_ALPHA_2D),
         apexPos
     )
     local occAlpha3D = self:_coneOcclusionAlpha(
-        (hit and cfg.VISION_CONE_HIT_ALPHA_3D or cfg.VISION_CONE_ALPHA_3D),
+        (inCone and cfg.VISION_CONE_HIT_ALPHA_3D or cfg.VISION_CONE_ALPHA_3D),
         apexPos
     )
 
     local alpha2D = clamp(occAlpha2D + (1 - tiltAlpha), 0, 1)
     local alpha3D = clamp(occAlpha3D + (1 - tiltAlpha), 0, 1)
 
-    -- ─── 2D fan ────────────────────────────────────────────────────────
     if #vc.strips > 0 then
         local N = cfg.VISION_CONE_STRIP_COUNT
         local span = 2 * halfFov
@@ -750,7 +786,6 @@ function ViewLines:_updateVisionCone(player, entry, hit)
         end
     end
 
-    -- ─── 3D spoke envelope ─────────────────────────────────────────────
     if #vc.spokes > 0 then
         local N = cfg.VISION_CONE_SPOKE_COUNT
         for i = 1, N do
@@ -790,8 +825,8 @@ function ViewLines:_updateVisionCone(player, entry, hit)
     if vc.highlight then
         vc.highlight.FillColor = baseColor
         vc.highlight.OutlineColor = baseColor
-        vc.highlight.FillTransparency = hit and 0.6 or 0.85
-        vc.highlight.OutlineTransparency = hit and 0.3 or 0.6
+        vc.highlight.FillTransparency = inCone and 0.6 or 0.85
+        vc.highlight.OutlineTransparency = inCone and 0.3 or 0.6
     end
 end
 
@@ -913,7 +948,7 @@ function ViewLines:_ensureEntry(player, myRoot)
 end
 
 --------------------------------------------------------------------------------
--- VISIBILITY / GEOMETRY / APPEARANCE
+-- VISIBILITY
 --------------------------------------------------------------------------------
 function ViewLines:_evaluateVisibility(viewerChar, viewerHead, myChar, mySamples)
     if #mySamples == 0 then return 0 end
@@ -977,6 +1012,9 @@ function ViewLines:_updateLookGeometry(entry, viewerHead, viewerChar)
     return endWorld, length
 end
 
+--------------------------------------------------------------------------------
+-- APPEARANCE
+--------------------------------------------------------------------------------
 function ViewLines:_applySightAppearance(beam, vis)
     local cfg = self.config
     local color, width, transparency
@@ -1182,9 +1220,12 @@ function ViewLines:update()
                             self:_updateEdgeIndicator(player, theirChar, hit, vis)
 
                             if cfg.VISION_CONE_ENABLED then
+                                local inCone = self:_amIInVisionCone(
+                                    theirChar, head, myChar, mySamples
+                                )
                                 coneCandidates[#coneCandidates + 1] = {
                                     player = player,
-                                    hit = hit,
+                                    inCone = inCone,
                                 }
                             end
                         end
@@ -1201,7 +1242,7 @@ function ViewLines:update()
             if picked[c.player] then
                 local e = self._entries[c.player]
                 if e then
-                    self:_updateVisionCone(c.player, e, c.hit)
+                    self:_updateVisionCone(c.player, e, c.inCone)
                 end
             else
                 self:_destroyVisionCone(c.player)
