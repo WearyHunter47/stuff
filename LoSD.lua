@@ -1,44 +1,31 @@
 --[[
-    ViewLines + SEI — merged module
-
+    ViewLines + SEI — merged module (Kerenzikov V1.1)
     Player line-of-sight + look-direction visualizer with off-screen
-    edge arrows for viewers who can see you but are outside your viewport.
+    edge arrows, and (new) physical vision cones anchored to the head.
 
-    Publishes per-player state to getgenv().ModuleBus.ViewLines so other
-    modules (ESP, healthbar) can react to sight/look detection.
+    Vision cones:
+      • 2D: flat Prism on the ground, apex at head X/Z, foot Y
+      • 3D: Pyramid volume from the head
+      • Optional per-cone Highlight
+      • Team colors, inverse hit color, in-house fallback
+      • Priority selection by distance (max 8 by default)
+      • Optional terrain conform (pitch only)
 
-    Bus payload (read from getgenv().ModuleBus.ViewLines):
-        Hit[player]         = true when the look beam is hitting you
-        Visibility[player]  = 0..1 sight-beam visibility fraction
-        Active              = true once :start() has run
-
-    Usage:
-        local ViewLines = loadstring(game:HttpGet(URL))()
-        local v = ViewLines.new({ FOV_DEGREES = 110 })
-        v:start()
-        -- ...
-        v:stop()
-
-    F10 kills by default; pass KILL_KEYBIND = nil to disable.
-
-    Edge indicator modes:
-        "Aimed"   — arrow only when the viewer's look beam hits you
-        "Visible" — arrow when the viewer has any visibility fraction > 0
-        "Always"  — arrow for any hostile that's off-screen/behind
+    No side effects on require. No auto-start, no print, no global.
 ]]
 
 local Players          = game:GetService("Players")
 local RunService       = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
+local CoreGui          = game:GetService("CoreGui")
 
 local LocalPlayer = Players.LocalPlayer
 local Camera      = workspace.CurrentCamera
 
 --------------------------------------------------------------------------------
--- DEFAULTS (ViewLines + SEI merged)
+-- DEFAULTS
 --------------------------------------------------------------------------------
 local DEFAULTS = {
-    -- -- ViewLines ----------------------------------------------------------
     FOV_DEGREES = 120,
     SAMPLE_PARTS = {
         "Head",
@@ -47,22 +34,16 @@ local DEFAULTS = {
         "Left Arm",     "Right Arm",
     },
 
-    -- Sight beam (viewer head → my root)
-    VISIBLE_COLOR        = Color3.fromRGB(255, 45, 45),
-    BLOCKED_COLOR        = Color3.fromRGB(80, 80, 80),
-    VISIBLE_TRANSPARENCY = 0.15,   -- legacy: unused by sight beam now
-    BLOCKED_TRANSPARENCY = 0.9,    -- legacy: unused by sight beam now
-    VISIBLE_WIDTH        = 0.15,
-    BLOCKED_WIDTH        = 0.05,
-    HIDE_SIGHT_WHEN_AIMED = true,
+    -- Sight beam
+    VISIBLE_COLOR          = Color3.fromRGB(255, 45, 45),
+    BLOCKED_COLOR          = Color3.fromRGB(80, 80, 80),
+    VISIBLE_WIDTH          = 0.15,
+    BLOCKED_WIDTH          = 0.05,
+    HIDE_SIGHT_WHEN_AIMED  = true,
+    SIGHT_ALPHA_UNVIEWED   = 0.75,
+    SIGHT_ALPHA_VIEWED     = 0.05,
 
-    -- Sight beam transparency now lerps with visibility fraction:
-    --   vis = 0   → SIGHT_ALPHA_UNVIEWED
-    --   vis = 1   → SIGHT_ALPHA_VIEWED
-    SIGHT_ALPHA_UNVIEWED = 0.75,
-    SIGHT_ALPHA_VIEWED   = 0.05,
-
-    -- Look beam (face → forward along Head.LookVector)
+    -- Look beam
     LOOK_COLOR              = Color3.fromRGB(60, 140, 255),
     LOOK_HIT_COLOR          = Color3.fromRGB(255, 40, 40),
     LOOK_TRANSPARENCY_NEAR  = 0.10,
@@ -77,48 +58,147 @@ local DEFAULTS = {
     LOOK_DOT_SIZE     = 0.35,
     LOOK_DOT_ALPHA    = 0.1,
 
+    -- Filters
     TEAM_CHECK      = true,
     IGNORE_WATER    = true,
     UPDATE_INTERVAL = 0,
     MAX_DISTANCE    = 0,
     KILL_KEYBIND    = Enum.KeyCode.F10,
 
-    -- -- Edge indicators (SEI) ----------------------------------------------
+    -- Beam occlusion
+    BEAM_OCCLUDE_ENABLED   = true,
+    BEAM_OCCLUDE_THRESHOLD = 0.85,
+    BEAM_OCCLUDE_MIN_ALPHA = 0.9,
+
+    -- Name formatting
+    NAME_MODE                 = "DisplayName",
+    NAME_TRUNCATE_USERNAME    = 8,
+    NAME_TRUNCATE_DISPLAYNAME = 8,
+
+    -- SEI
     EDGE_INDICATORS     = true,
-    EDGE_INDICATOR_MODE = "Aimed",   -- "Aimed" | "Visible" | "Always"
+    EDGE_INDICATOR_MODE = "Visible",
+    EDGE_PADDING        = 64,
+    EDGE_ARROW_SIZE     = 36,
 
-    EDGE_PADDING     = 64,
-    EDGE_ARROW_SIZE  = 36,
-
-    -- Arrow colors: two states, toggled by the look-beam hit
-    EDGE_ARROW_COLOR       = Color3.fromRGB(60, 140, 255),   -- just visible
-    EDGE_ARROW_ALERT_COLOR = Color3.fromRGB(255, 40, 40),    -- actively aiming
+    EDGE_ARROW_COLOR       = Color3.fromRGB(60, 140, 255),
+    EDGE_ARROW_ALERT_COLOR = Color3.fromRGB(255, 40, 40),
     EDGE_ARROW_ALPHA       = 0.15,
 
-    -- Nametag
-    EDGE_SHOW_NAME         = true,
-    EDGE_NAME_SIZE         = 14,
-    EDGE_NAME_SIZE_VIEWED  = 22,     -- boost when viewer is actively aiming
-    EDGE_NAME_COLOR        = Color3.fromRGB(255, 255, 255),  -- fallback only
-    EDGE_NAME_ALPHA        = 0.9,    -- baseline (not being viewed)
-    EDGE_NAME_ALPHA_VIEWED = 0.0,    -- fully visible when seen/aimed at
-    -- Visibility fraction at which the nametag flips to NAME_ALPHA_VIEWED.
-    -- Size boost is separate and only follows the look beam.
+    EDGE_SHOW_NAME            = true,
+    EDGE_NAME_SIZE            = 14,
+    EDGE_NAME_SIZE_VIEWED     = 22,
+    EDGE_NAME_COLOR           = Color3.fromRGB(255, 255, 255),
+    EDGE_NAME_ALPHA           = 0.9,
+    EDGE_NAME_ALPHA_VIEWED    = 0.0,
     EDGE_NAME_SIGHT_THRESHOLD = 0.1,
+
+    -- ─── Vision cones ──────────────────────────────────────────────────
+    VISION_CONE_ENABLED        = true,
+    VISION_CONE_MODE           = "2D",        -- "2D" | "3D" | "Both"
+    VISION_CONE_MAX_PLAYERS    = 8,
+    VISION_CONE_RANGE          = 20,
+    VISION_CONE_ACTIVATION_RANGE = 150,       -- only render if within this
+
+    VISION_CONE_COLOR_MODE     = "Team",      -- "Team" | "Fixed" | "Healthbar"
+    VISION_CONE_FIXED_COLOR    = Color3.fromRGB(255, 200, 80),
+    VISION_CONE_USE_FIXED_HIT  = false,       -- false = inverse of base color
+    VISION_CONE_FIXED_HIT_COLOR = Color3.fromRGB(255, 60, 60),
+
+    VISION_CONE_ALPHA_2D       = 0.7,
+    VISION_CONE_ALPHA_3D       = 0.85,
+    VISION_CONE_HIT_ALPHA_2D   = 0.4,
+    VISION_CONE_HIT_ALPHA_3D   = 0.65,
+
+    VISION_CONE_HIGHLIGHT      = true,
+    VISION_CONE_HIGHLIGHT_DEPTH = "Occluded", -- "Occluded" | "AlwaysOnTop"
+    VISION_CONE_GROUND_OFFSET  = 0.15,
+
+    VISION_CONE_CONFORM_TERRAIN = false,
+    VISION_CONE_CONFORM_RAYS    = 2,          -- 2 = pitch only, 4 = +roll
+
+    VISION_CONE_TILT_FADE      = true,        -- fade when head tilts off-horizontal
+    VISION_CONE_OCCLUDE_ENABLED = true,       -- fade 3D cone when looking at it
+    VISION_CONE_OCCLUDE_THRESHOLD = 0.85,
+    VISION_CONE_OCCLUDE_MIN_ALPHA = 0.9,
+
+    VISION_CONE_DOT_ENABLED    = false,       -- small dot at cone tip
 }
 
 --------------------------------------------------------------------------------
 -- HELPERS
 --------------------------------------------------------------------------------
-local function teamColorOf(player)
-    if player.Team and player.TeamColor then
-        return player.TeamColor.Color
+local function clamp(v, a, b) return math.max(a, math.min(b, v)) end
+
+local function truncateName(s, maxLen)
+    if not maxLen or maxLen <= 0 then return s end
+    if #s <= maxLen then return s end
+    return s:sub(1, maxLen) .. ".."
+end
+
+local function formatPlayerName(player, cfg)
+    local mode = cfg.NAME_MODE or "DisplayName"
+    local un = truncateName(player.Name,        cfg.NAME_TRUNCATE_USERNAME or 0)
+    local dn = truncateName(player.DisplayName, cfg.NAME_TRUNCATE_DISPLAYNAME or 0)
+    if mode == "Username" then
+        return un
+    elseif mode == "Both" then
+        return un .. " (" .. dn .. ")"
+    else
+        return dn
     end
-    return Color3.fromRGB(235, 235, 235)
+end
+
+local function getTeamColorOf(player)
+    if player and player.Team and player.Team.TeamColor
+        and player.Team.TeamColor ~= BrickColor.new("Neutral")
+    then
+        return player.Team.TeamColor.Color
+    end
+    return nil
+end
+
+local function inverseColor(c)
+    return Color3.new(1 - c.R, 1 - c.G, 1 - c.B)
+end
+
+local function eyeOf(head)
+    local look = head.CFrame.LookVector
+    return head.Position + look * (head.Size.Z * 0.5), look
+end
+
+-- Beam occlusion helper (same as before)
+local function applyBeamOcclusion(cfg, worldA, worldB, baseAlpha)
+    if not cfg.BEAM_OCCLUDE_ENABLED then return baseAlpha end
+    local cam = workspace.CurrentCamera
+    if not cam then return baseAlpha end
+
+    local camPos  = cam.CFrame.Position
+    local camLook = cam.CFrame.LookVector
+    local facing = 0
+
+    if worldA then
+        local toA = worldA - camPos
+        local dA = toA.Magnitude
+        if dA > 1e-3 then facing = math.max(facing, camLook:Dot(toA / dA)) end
+    end
+    if worldA and worldB then
+        local mid = (worldA + worldB) * 0.5
+        local toMid = mid - camPos
+        local dM = toMid.Magnitude
+        if dM > 1e-3 then facing = math.max(facing, camLook:Dot(toMid / dM)) end
+    end
+
+    local thresh = cfg.BEAM_OCCLUDE_THRESHOLD or 0.85
+    if facing <= thresh then return baseAlpha end
+
+    local factor = (facing - thresh) / math.max(1 - thresh, 1e-3)
+    local minA = cfg.BEAM_OCCLUDE_MIN_ALPHA or 0.9
+    return clamp(baseAlpha + (minA - baseAlpha) * factor, 0, 1)
 end
 
 --------------------------------------------------------------------------------
--- SEI — ScreenEdgeIndicators (embedded sub-module)
+-- SEI
 --------------------------------------------------------------------------------
 local ScreenEdgeIndicators = {}
 ScreenEdgeIndicators.__index = ScreenEdgeIndicators
@@ -126,34 +206,28 @@ ScreenEdgeIndicators.__index = ScreenEdgeIndicators
 function ScreenEdgeIndicators.new(overrides)
     local self = setmetatable({}, ScreenEdgeIndicators)
     self.config = {
-        PADDING           = 64,
-        ARROW_SIZE        = 36,
-        ARROW_COLOR       = Color3.fromRGB(60, 140, 255),
-        ARROW_ALPHA       = 0.15,
-        SHOW_NAME         = true,
-        NAME_SIZE         = 14,
-        NAME_SIZE_VIEWED  = 22,
-        NAME_COLOR        = Color3.fromRGB(255, 255, 255),
-        NAME_ALPHA        = 0.9,
-        NAME_ALPHA_VIEWED = 0.0,
-        UPDATE_INTERVAL   = 0,
-        KILL_KEYBIND      = nil,
+        PADDING = 64, ARROW_SIZE = 36,
+        ARROW_COLOR = Color3.fromRGB(60, 140, 255), ARROW_ALPHA = 0.15,
+        SHOW_NAME = true, NAME_SIZE = 14, NAME_SIZE_VIEWED = 22,
+        NAME_COLOR = Color3.fromRGB(255, 255, 255),
+        NAME_ALPHA = 0.9, NAME_ALPHA_VIEWED = 0.0,
+        NAME_MODE = "DisplayName",
+        NAME_TRUNCATE_USERNAME = 8, NAME_TRUNCATE_DISPLAYNAME = 8,
+        UPDATE_INTERVAL = 0, KILL_KEYBIND = nil,
     }
-    if overrides then
-        for k, v in pairs(overrides) do self.config[k] = v end
-    end
+    if overrides then for k, v in pairs(overrides) do self.config[k] = v end end
 
-    self._targets     = {}
+    self._targets = {}
     self._connections = {}
-    self._running     = false
-    self._lastUpdate  = 0
+    self._running = false
+    self._lastUpdate = 0
 
     local gui = Instance.new("ScreenGui")
-    gui.Name            = "ScreenEdgeIndicators"
-    gui.ResetOnSpawn    = false
-    gui.IgnoreGuiInset  = true
-    gui.ZIndexBehavior  = Enum.ZIndexBehavior.Sibling
-    gui.Parent          = LocalPlayer:WaitForChild("PlayerGui")
+    gui.Name = "ScreenEdgeIndicators"
+    gui.ResetOnSpawn = false
+    gui.IgnoreGuiInset = true
+    gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    gui.Parent = LocalPlayer:WaitForChild("PlayerGui")
     self._gui = gui
 
     return self
@@ -166,61 +240,55 @@ end
 
 function ScreenEdgeIndicators:_buildArrow(cfg)
     local frame = Instance.new("Frame")
-    frame.Name                   = "ArrowRoot"
-    frame.Size                   = UDim2.fromOffset(self.config.ARROW_SIZE, self.config.ARROW_SIZE)
-    frame.AnchorPoint            = Vector2.new(0.5, 0.5)
+    frame.Name = "ArrowRoot"
+    frame.Size = UDim2.fromOffset(self.config.ARROW_SIZE, self.config.ARROW_SIZE)
+    frame.AnchorPoint = Vector2.new(0.5, 0.5)
     frame.BackgroundTransparency = 1
-    frame.Parent                 = self._gui
+    frame.Parent = self._gui
 
     local arrow = Instance.new("ImageLabel")
-    arrow.Name                   = "Arrow"
-    arrow.Size                   = UDim2.fromScale(1, 1)
+    arrow.Name = "Arrow"
+    arrow.Size = UDim2.fromScale(1, 1)
     arrow.BackgroundTransparency = 1
-    arrow.Image                  = "rbxassetid://5052874450"
-    arrow.ImageColor3            = cfg.Color or self.config.ARROW_COLOR
-    arrow.ImageTransparency      = cfg.Alpha or self.config.ARROW_ALPHA
-    arrow.Rotation               = 0
-    arrow.Parent                 = frame
+    arrow.Image = "rbxassetid://5052874450"
+    arrow.ImageColor3 = cfg.Color or self.config.ARROW_COLOR
+    arrow.ImageTransparency = cfg.Alpha or self.config.ARROW_ALPHA
+    arrow.Rotation = 0
+    arrow.Parent = frame
 
     local label
     if self.config.SHOW_NAME then
         label = Instance.new("TextLabel")
-        label.Name                   = "Name"
-        label.AnchorPoint            = Vector2.new(0.5, 0)
-        label.Position               = UDim2.new(0.5, 0, 1, 4)
-        label.Size                   = UDim2.fromOffset(120, self.config.NAME_SIZE + 6)
+        label.Name = "Name"
+        label.AnchorPoint = Vector2.new(0.5, 0)
+        label.Position = UDim2.new(0.5, 0, 1, 4)
+        label.Size = UDim2.fromOffset(120, self.config.NAME_SIZE + 6)
         label.BackgroundTransparency = 1
-        label.Font                   = Enum.Font.GothamMedium
-        label.TextSize               = self.config.NAME_SIZE
-        label.TextColor3             = self.config.NAME_COLOR
-        label.TextTransparency       = self.config.NAME_ALPHA
-        label.Text                   = ""
-        label.Parent                 = frame
+        label.Font = Enum.Font.GothamMedium
+        label.TextSize = self.config.NAME_SIZE
+        label.TextColor3 = self.config.NAME_COLOR
+        label.TextTransparency = self.config.NAME_ALPHA
+        label.Text = ""
+        label.Parent = frame
     end
-
     return frame, arrow, label
 end
 
 function ScreenEdgeIndicators:_destroyTarget(player)
     local entry = self._targets[player]
     if not entry then return end
-    if entry.frame then
-        pcall(function() entry.frame:Destroy() end)
-    end
+    if entry.frame then pcall(function() entry.frame:Destroy() end) end
     self._targets[player] = nil
 end
 
--- addTarget: creates on first call, refreshes dynamic fields thereafter.
--- `Viewing` = opacity (look beam OR sight threshold)
--- `Aiming`  = size boost (look beam only)
 function ScreenEdgeIndicators:addTarget(player, opts)
     if player == LocalPlayer then return end
     opts = opts or {}
 
     local existing = self._targets[player]
     if existing then
-        existing.viewing   = opts.Viewing and true or false
-        existing.aiming    = opts.Aiming  and true or false
+        existing.viewing = opts.Viewing and true or false
+        existing.aiming = opts.Aiming and true or false
         existing.nameColor = opts.NameColor or existing.nameColor
         if opts.Color then existing.color = opts.Color end
         if opts.Alpha then existing.alpha = opts.Alpha end
@@ -229,21 +297,16 @@ function ScreenEdgeIndicators:addTarget(player, opts)
 
     local frame, arrow, label = self:_buildArrow(opts)
     self._targets[player] = {
-        frame     = frame,
-        arrow     = arrow,
-        label     = label,
-        color     = opts.Color     or self.config.ARROW_COLOR,
-        alpha     = opts.Alpha     or self.config.ARROW_ALPHA,
+        frame = frame, arrow = arrow, label = label,
+        color = opts.Color or self.config.ARROW_COLOR,
+        alpha = opts.Alpha or self.config.ARROW_ALPHA,
         nameColor = opts.NameColor or self.config.NAME_COLOR,
-        viewing   = opts.Viewing   and true or false,
-        aiming    = opts.Aiming    and true or false,
+        viewing = opts.Viewing and true or false,
+        aiming = opts.Aiming and true or false,
     }
 end
 
-function ScreenEdgeIndicators:removeTarget(player)
-    self:_destroyTarget(player)
-end
-
+function ScreenEdgeIndicators:removeTarget(player) self:_destroyTarget(player) end
 function ScreenEdgeIndicators:clearTargets()
     local list = {}
     for p in pairs(self._targets) do list[#list + 1] = p end
@@ -253,11 +316,10 @@ end
 function ScreenEdgeIndicators:update()
     local cam = workspace.CurrentCamera
     if not cam then return end
-
     local viewport = cam.ViewportSize
     if viewport.X <= 0 or viewport.Y <= 0 then return end
 
-    local pad   = self.config.PADDING
+    local pad = self.config.PADDING
     local halfX = viewport.X * 0.5
     local halfY = viewport.Y * 0.5
 
@@ -274,58 +336,49 @@ function ScreenEdgeIndicators:update()
         else
             local screenPos, onScreen = cam:WorldToViewportPoint(anchor.Position)
             local camSpace = cam.CFrame:PointToObjectSpace(anchor.Position)
-            local behind   = camSpace.Z >= 0
+            local behind = camSpace.Z >= 0
             local isOffscreen = (not onScreen) or behind
 
             local clampedX = math.clamp(screenPos.X, pad, viewport.X - pad)
             local clampedY = math.clamp(screenPos.Y, pad, viewport.Y - pad)
-            local atEdge   = (clampedX ~= screenPos.X) or (clampedY ~= screenPos.Y)
+            local atEdge = (clampedX ~= screenPos.X) or (clampedY ~= screenPos.Y)
 
             if isOffscreen or atEdge then
                 entry.frame.Visible = true
 
                 local toTarget = anchor.Position - cam.CFrame.Position
-                local obj      = cam.CFrame:VectorToObjectSpace(toTarget)
-
+                local obj = cam.CFrame:VectorToObjectSpace(toTarget)
                 local dir2D = Vector2.new(obj.X, obj.Y)
-                if dir2D.Magnitude < 1e-4 then
-                    dir2D = Vector2.new(0, 1)
-                end
+                if dir2D.Magnitude < 1e-4 then dir2D = Vector2.new(0, 1) end
                 dir2D = dir2D.Unit
 
                 local tX = halfX / math.max(math.abs(dir2D.X), 1e-4)
                 local tY = halfY / math.max(math.abs(dir2D.Y), 1e-4)
-                local t  = math.min(tX, tY)
+                local t = math.min(tX, tY)
 
                 local edgeX = halfX + dir2D.X * t
                 local edgeY = halfY - dir2D.Y * t
-
                 edgeX = math.clamp(edgeX, pad, viewport.X - pad)
                 edgeY = math.clamp(edgeY, pad, viewport.Y - pad)
 
                 entry.frame.Position = UDim2.fromOffset(edgeX, edgeY)
+                entry.arrow.Rotation = math.deg(math.atan2(dir2D.X, dir2D.Y))
 
-                local angle = math.deg(math.atan2(dir2D.X, dir2D.Y))
-                entry.arrow.Rotation = angle
-
-                entry.arrow.ImageColor3       = entry.color
+                entry.arrow.ImageColor3 = entry.color
                 entry.arrow.ImageTransparency = entry.alpha
 
                 if entry.label then
-                    entry.label.Text = player.DisplayName or player.Name
+                    entry.label.Text = formatPlayerName(player, self.config)
                     entry.label.TextColor3 = entry.nameColor
-
-                    -- Opacity: flips when the viewer can see us at all.
                     entry.label.TextTransparency = entry.viewing
                         and self.config.NAME_ALPHA_VIEWED
-                        or  self.config.NAME_ALPHA
+                        or self.config.NAME_ALPHA
 
-                    -- Size: boosted only when actively aiming.
                     local nameSize = entry.aiming
                         and self.config.NAME_SIZE_VIEWED
-                        or  self.config.NAME_SIZE
+                        or self.config.NAME_SIZE
                     entry.label.TextSize = nameSize
-                    entry.label.Size     = UDim2.fromOffset(120, nameSize + 6)
+                    entry.label.Size = UDim2.fromOffset(120, nameSize + 6)
                 end
             else
                 entry.frame.Visible = false
@@ -335,23 +388,16 @@ function ScreenEdgeIndicators:update()
 end
 
 function ScreenEdgeIndicators:stop()
-    for i = #self._connections, 1, -1 do
-        local c = self._connections[i]
-        self._connections[i] = nil
-        if typeof(c) == "RBXScriptConnection" then
-            c:Disconnect()
-        end
+    for _, c in ipairs(self._connections) do
+        pcall(function() c:Disconnect() end)
     end
     self._connections = {}
-    pcall(function() self:clearTargets() end)
+    self:clearTargets()
     if self._gui then
         pcall(function() self._gui:Destroy() end)
         self._gui = nil
     end
     self._running = false
-end
-function ScreenEdgeIndicators:destroy()
-    self:stop()
 end
 
 --------------------------------------------------------------------------------
@@ -359,49 +405,6 @@ end
 --------------------------------------------------------------------------------
 local ViewLines = {}
 ViewLines.__index = ViewLines
-
-local function eyeOf(head)
-    local look = head.CFrame.LookVector
-    return head.Position + look * (head.Size.Z * 0.5), look
-end
-
--- Blend a beam's base transparency toward BEAM_OCCLUDE_MIN_ALPHA when the
--- camera looks directly at the beam's midpoint or at either endpoint.
-local function applyBeamOcclusion(cfg, worldA, worldB, baseAlpha)
-    if not cfg.BEAM_OCCLUDE_ENABLED then return baseAlpha end
-
-    local cam = workspace.CurrentCamera
-    if not cam then return baseAlpha end
-
-    local camPos  = cam.CFrame.Position
-    local camLook = cam.CFrame.LookVector
-
-    local facing = 0
-
-    if worldA then
-        local toA = worldA - camPos
-        local dA  = toA.Magnitude
-        if dA > 1e-3 then
-            facing = math.max(facing, camLook:Dot(toA / dA))
-        end
-    end
-
-    if worldA and worldB then
-        local mid   = (worldA + worldB) * 0.5
-        local toMid = mid - camPos
-        local dM    = toMid.Magnitude
-        if dM > 1e-3 then
-            facing = math.max(facing, camLook:Dot(toMid / dM))
-        end
-    end
-
-    local thresh = cfg.BEAM_OCCLUDE_THRESHOLD or 0.85
-    if facing <= thresh then return baseAlpha end
-
-    local factor = (facing - thresh) / math.max(1 - thresh, 1e-3)
-    local minA   = cfg.BEAM_OCCLUDE_MIN_ALPHA or 0.9
-    return math.clamp(baseAlpha + (minA - baseAlpha) * factor, 0, 1)
-end
 
 function ViewLines.new(overrides)
     local self = setmetatable({}, ViewLines)
@@ -412,32 +415,32 @@ function ViewLines.new(overrides)
     end
 
     self._entries     = {}
+    self._visionCones = {}
     self._connections = {}
     self._running     = false
     self._lastUpdate  = 0
 
-    -- Embedded SEI, configured from ViewLines' EDGE_* keys.
     self._edgeIndicators = ScreenEdgeIndicators.new({
-        PADDING           = self.config.EDGE_PADDING,
-        ARROW_SIZE        = self.config.EDGE_ARROW_SIZE,
-        ARROW_COLOR       = self.config.EDGE_ARROW_COLOR,
-        ARROW_ALPHA       = self.config.EDGE_ARROW_ALPHA,
-        SHOW_NAME         = self.config.EDGE_SHOW_NAME,
-        NAME_SIZE         = self.config.EDGE_NAME_SIZE,
-        NAME_SIZE_VIEWED  = self.config.EDGE_NAME_SIZE_VIEWED,
-        NAME_COLOR        = self.config.EDGE_NAME_COLOR,
-        NAME_ALPHA        = self.config.EDGE_NAME_ALPHA,
+        PADDING = self.config.EDGE_PADDING,
+        ARROW_SIZE = self.config.EDGE_ARROW_SIZE,
+        ARROW_COLOR = self.config.EDGE_ARROW_COLOR,
+        ARROW_ALPHA = self.config.EDGE_ARROW_ALPHA,
+        SHOW_NAME = self.config.EDGE_SHOW_NAME,
+        NAME_SIZE = self.config.EDGE_NAME_SIZE,
+        NAME_SIZE_VIEWED = self.config.EDGE_NAME_SIZE_VIEWED,
+        NAME_COLOR = self.config.EDGE_NAME_COLOR,
+        NAME_ALPHA = self.config.EDGE_NAME_ALPHA,
         NAME_ALPHA_VIEWED = self.config.EDGE_NAME_ALPHA_VIEWED,
-        UPDATE_INTERVAL   = 0,
-        KILL_KEYBIND      = nil,   -- ViewLines owns the kill switch
+        NAME_MODE = self.config.NAME_MODE,
+        NAME_TRUNCATE_USERNAME = self.config.NAME_TRUNCATE_USERNAME,
+        NAME_TRUNCATE_DISPLAYNAME = self.config.NAME_TRUNCATE_DISPLAYNAME,
+        UPDATE_INTERVAL = 0,
+        KILL_KEYBIND = nil,
     })
 
     return self
 end
 
---------------------------------------------------------------------------------
--- INTERNALS
---------------------------------------------------------------------------------
 function ViewLines:_track(conn)
     self._connections[#self._connections + 1] = conn
     return conn
@@ -468,39 +471,32 @@ function ViewLines:_getSamplePoints(char)
         local part = char:FindFirstChild(name)
         if part and part:IsA("BasePart") then
             pts[#pts + 1] = {
-                pos    = part.Position,
+                pos = part.Position,
                 radius = math.max(part.Size.X, part.Size.Y, part.Size.Z) * 0.5,
             }
         end
     end
     if #pts == 0 then
         local root = char:FindFirstChild("HumanoidRootPart")
-        if root then
-            pts[1] = { pos = root.Position, radius = 1.5 }
-        end
+        if root then pts[1] = { pos = root.Position, radius = 1.5 } end
     end
     return pts
 end
 
--- Bus publishing: exposes per-player state for other modules.
 function ViewLines:_publishToBus(player, hit, vis)
     local bus = getgenv().ModuleBus
     if not bus or not bus.ViewLines then return end
     if not bus.ViewLines.Hit then bus.ViewLines.Hit = {} end
     if not bus.ViewLines.Visibility then bus.ViewLines.Visibility = {} end
-    bus.ViewLines.Hit[player]        = hit
+    bus.ViewLines.Hit[player] = hit
     bus.ViewLines.Visibility[player] = vis
 end
 
 function ViewLines:_publishClear(player)
     local bus = getgenv().ModuleBus
     if not bus or not bus.ViewLines then return end
-    if bus.ViewLines.Hit then
-        bus.ViewLines.Hit[player] = nil
-    end
-    if bus.ViewLines.Visibility then
-        bus.ViewLines.Visibility[player] = nil
-    end
+    if bus.ViewLines.Hit then bus.ViewLines.Hit[player] = nil end
+    if bus.ViewLines.Visibility then bus.ViewLines.Visibility[player] = nil end
 end
 
 function ViewLines:_publishClearAll()
@@ -510,24 +506,284 @@ function ViewLines:_publishClearAll()
     bus.ViewLines.Visibility = {}
 end
 
--- Defensive cleanup: visuals destroyed first so a bus/SEI error can't
--- leave orphaned dots or beams.
-function ViewLines:_cleanup(player)
-    local e = self._entries[player]
-    if not e then return end
-
+-- ─── Vision cone builders ─────────────────────────────────────────────
+function ViewLines:_destroyVisionCone(player)
+    local vc = self._visionCones[player]
+    if not vc then return end
     for _, obj in ipairs({
-        e.sightBeam, e.sightAttViewer, e.sightAttMine,
-        e.lookBeam,  e.lookAttFace,    e.lookAttTip,
-        e.dotPart,
+        vc.model, vc.highlight, vc.part2D, vc.mesh2D,
+        vc.part3D, vc.mesh3D,
     }) do
-        if obj then
-            pcall(function() obj:Destroy() end)
+        if obj then pcall(function() obj:Destroy() end) end
+    end
+    self._visionCones[player] = nil
+end
+
+function ViewLines:_createVisionCone(player)
+    if self._visionCones[player] then return self._visionCones[player] end
+    local cfg = self.config
+    local vc = {}
+
+    local model = Instance.new("Model")
+    model.Name = "VisionCone_" .. player.Name
+    model.Parent = workspace
+    vc.model = model
+
+    -- 2D: flat Prism on the ground
+    if cfg.VISION_CONE_MODE == "2D" or cfg.VISION_CONE_MODE == "Both" then
+        local part = Instance.new("Part")
+        part.Name = "Cone2D"
+        part.Anchored = true
+        part.CanCollide = false
+        part.CanQuery = false
+        part.CanTouch = false
+        part.CastShadow = false
+        part.Material = Enum.Material.Neon
+        part.Transparency = cfg.VISION_CONE_ALPHA_2D
+        part.Size = Vector3.new(1, 0.1, 1)   -- resized per frame
+        part.Color = Color3.fromRGB(255, 200, 80)
+
+        local mesh = Instance.new("SpecialMesh")
+        mesh.MeshType = Enum.MeshType.Prism
+        mesh.Parent = part
+
+        part.Parent = model
+        vc.part2D = part
+        vc.mesh2D = mesh
+    end
+
+    -- 3D: Pyramid volume from the head
+    if cfg.VISION_CONE_MODE == "3D" or cfg.VISION_CONE_MODE == "Both" then
+        local part = Instance.new("Part")
+        part.Name = "Cone3D"
+        part.Anchored = true
+        part.CanCollide = false
+        part.CanQuery = false
+        part.CanTouch = false
+        part.CastShadow = false
+        part.Material = Enum.Material.Neon
+        part.Transparency = cfg.VISION_CONE_ALPHA_3D
+        part.Size = Vector3.new(1, 1, 1)
+        part.Color = Color3.fromRGB(255, 200, 80)
+
+        local mesh = Instance.new("SpecialMesh")
+        mesh.MeshType = Enum.MeshType.Pyramid
+        mesh.Parent = part
+
+        part.Parent = model
+        vc.part3D = part
+        vc.mesh3D = mesh
+    end
+
+    if cfg.VISION_CONE_HIGHLIGHT then
+        local hl = Instance.new("Highlight")
+        hl.Adornee = model
+        hl.DepthMode = (cfg.VISION_CONE_HIGHLIGHT_DEPTH == "AlwaysOnTop")
+            and Enum.HighlightDepthMode.AlwaysOnTop
+            or  Enum.HighlightDepthMode.Occluded
+        hl.FillColor = cfg.VISION_CONE_FIXED_COLOR
+        hl.OutlineColor = cfg.VISION_CONE_FIXED_COLOR
+        hl.FillTransparency = 0.8
+        hl.OutlineTransparency = 0.5
+        hl.Parent = CoreGui
+        vc.highlight = hl
+    end
+
+    self._visionCones[player] = vc
+    return vc
+end
+
+function ViewLines:_resolveConeColor(player, hit)
+    local cfg = self.config
+    local base
+
+    if cfg.VISION_CONE_COLOR_MODE == "Fixed" then
+        base = cfg.VISION_CONE_FIXED_COLOR
+    else -- "Team" (fallback to fixed if no team)
+        base = getTeamColorOf(player) or cfg.VISION_CONE_FIXED_COLOR
+    end
+
+    if hit then
+        if cfg.VISION_CONE_USE_FIXED_HIT then
+            return cfg.VISION_CONE_FIXED_HIT_COLOR
+        else
+            return inverseColor(base)
         end
     end
 
+    return base
+end
+
+function ViewLines:_coneOcclusionAlpha(baseAlpha, worldPos)
+    local cfg = self.config
+    if not cfg.VISION_CONE_OCCLUDE_ENABLED then return baseAlpha end
+
+    local cam = Camera
+    if not cam then return baseAlpha end
+
+    local toPos = worldPos - cam.CFrame.Position
+    local d = toPos.Magnitude
+    if d < 1e-3 then return baseAlpha end
+    local facing = cam.CFrame.LookVector:Dot(toPos / d)
+
+    local thresh = cfg.VISION_CONE_OCCLUDE_THRESHOLD or 0.85
+    if facing <= thresh then return baseAlpha end
+
+    local factor = (facing - thresh) / math.max(1 - thresh, 1e-3)
+    local minA = cfg.VISION_CONE_OCCLUDE_MIN_ALPHA or 0.9
+    return clamp(baseAlpha + (minA - baseAlpha) * factor, 0, 1)
+end
+
+function ViewLines:_updateVisionCone(player, entry, hit)
+    local cfg = self.config
+    if not cfg.VISION_CONE_ENABLED then return end
+    if not entry or not entry.viewerHead or not entry.viewerHead.Parent then return end
+
+    local vc = self:_createVisionCone(player)
+    local head = entry.viewerHead
+    local char = player.Character
+    if not char then return end
+
+    -- Direction (flattened)
+    local look = head.CFrame.LookVector
+    local flat = Vector3.new(look.X, 0, look.Z)
+    if flat.Magnitude < 1e-4 then flat = Vector3.new(0, 0, -1) end
+    flat = flat.Unit
+
+    -- Vertical anchor at foot Y
+    local root = char:FindFirstChild("HumanoidRootPart")
+    local footY = head.Position.Y - 3
+    if root then
+        footY = root.Position.Y - root.Size.Y * 0.5
+    end
+
+    -- Apex position (head X/Z, foot Y)
+    local apexPos = Vector3.new(
+        head.Position.X,
+        footY + cfg.VISION_CONE_GROUND_OFFSET,
+        head.Position.Z
+    )
+
+    -- Cone CFrame
+    local coneCFrame = CFrame.lookAt(apexPos, apexPos + flat)
+    local apexY = apexPos.Y
+
+    -- Terrain conform: raycast at apex + base center for pitch
+    if cfg.VISION_CONE_CONFORM_TERRAIN then
+        local rp = self:_rayParams(char)
+        local baseCenter = apexPos + flat * cfg.VISION_CONE_RANGE
+
+        local apexHit = workspace:Raycast(
+            Vector3.new(apexPos.X, apexPos.Y + 6, apexPos.Z),
+            Vector3.new(0, -20, 0),
+            rp
+        )
+        local baseHit = workspace:Raycast(
+            Vector3.new(baseCenter.X, baseCenter.Y + 6, baseCenter.Z),
+            Vector3.new(0, -20, 0),
+            rp
+        )
+
+        local useApexY = apexHit and (apexHit.Position.Y + cfg.VISION_CONE_GROUND_OFFSET) or apexPos.Y
+        apexY = useApexY
+
+        local baseY = baseHit and (baseHit.Position.Y + cfg.VISION_CONE_GROUND_OFFSET)
+            or (useApexY)
+        local dy = baseY - useApexY
+        local dx = math.max(cfg.VISION_CONE_RANGE, 1e-3)
+        local pitch = math.atan2(dy, dx)
+
+        apexPos = Vector3.new(apexPos.X, useApexY, apexPos.Z)
+        local baseCF = CFrame.lookAt(apexPos, apexPos + flat)
+        coneCFrame = baseCF * CFrame.Angles(-pitch, 0, 0)
+    end
+
+    -- Tilt fade: reduce alpha proportionally to head pitch away from horizontal
+    local tiltAlpha = 1
+    if cfg.VISION_CONE_TILT_FADE then
+        tiltAlpha = clamp(1 - math.abs(look.Y), 0, 1)
+    end
+
+    -- FOV geometry
+    local halfFov = math.rad((cfg.FOV_DEGREES or 120) * 0.5)
+    local baseWidth = 2 * cfg.VISION_CONE_RANGE * math.tan(halfFov)
+
+    -- Base color from team / fixed / healthbar
+    local baseColor = self:_resolveConeColor(player, hit)
+
+    -- ─── 2D cone ──────────────────────────────────────────────────────
+    if vc.part2D then
+        local width2D = cfg.VISION_CONE_RANGE
+        local depth2D = baseWidth
+
+        vc.part2D.Size = Vector3.new(width2D, 0.1, depth2D)
+        -- Prism apex at origin: shift so the apex sits at the head position
+        vc.part2D.CFrame = coneCFrame
+            * CFrame.new(width2D * 0.5, 0, 0)
+
+        local alpha2D = (hit and cfg.VISION_CONE_HIT_ALPHA_2D or cfg.VISION_CONE_ALPHA_2D)
+        if cfg.VISION_CONE_OCCLUDE_ENABLED then
+            alpha2D = self:_coneOcclusionAlpha(alpha2D, vc.part2D.Position)
+        end
+        -- Apply tilt fade (adds transparency as head tilts)
+        alpha2D = clamp(alpha2D + (1 - tiltAlpha), 0, 1)
+
+        vc.part2D.Transparency = alpha2D
+        vc.part2D.Color = baseColor
+    end
+
+    -- ─── 3D cone ──────────────────────────────────────────────────────
+    if vc.part3D then
+        -- Pyramid apex at head, base at range
+        -- Pyramid mesh native apex is at +Y, base at -Y typically; we point it forward
+        local length3D = cfg.VISION_CONE_RANGE
+        local width3D = baseWidth
+        local height3D = baseWidth
+
+        vc.part3D.Size = Vector3.new(width3D, length3D, height3D)
+        -- Orientation: the Pyramid mesh's axis is along Y, so we need to
+        -- rotate it to point along the cone direction (flat)
+        vc.part3D.CFrame = coneCFrame
+            * CFrame.Angles(math.rad(90), 0, 0)
+            * CFrame.new(0, -length3D * 0.5, 0)
+
+        local alpha3D = (hit and cfg.VISION_CONE_HIT_ALPHA_3D or cfg.VISION_CONE_ALPHA_3D)
+        if cfg.VISION_CONE_OCCLUDE_ENABLED then
+            alpha3D = self:_coneOcclusionAlpha(alpha3D, vc.part3D.Position)
+        end
+        alpha3D = clamp(alpha3D + (1 - tiltAlpha), 0, 1)
+
+        vc.part3D.Transparency = alpha3D
+        vc.part3D.Color = baseColor
+    end
+
+    -- Highlight color
+    if vc.highlight then
+        vc.highlight.FillColor = baseColor
+        vc.highlight.OutlineColor = baseColor
+        vc.highlight.FillTransparency = hit and 0.6 or 0.85
+        vc.highlight.OutlineTransparency = hit and 0.3 or 0.6
+    end
+end
+
+-- ─── Cleanup ──────────────────────────────────────────────────────────
+function ViewLines:_cleanup(player)
+    local e = self._entries[player]
+    if not e then
+        self:_destroyVisionCone(player)
+        return
+    end
+
+    for _, obj in ipairs({
+        e.sightBeam, e.sightAttViewer, e.sightAttMine,
+        e.lookBeam, e.lookAttFace, e.lookAttTip,
+        e.dotPart,
+    }) do
+        if obj then pcall(function() obj:Destroy() end) end
+    end
     self._entries[player] = nil
 
+    self:_destroyVisionCone(player)
     pcall(function() self:_publishClear(player) end)
     pcall(function() self._edgeIndicators:removeTarget(player) end)
 end
@@ -536,6 +792,12 @@ function ViewLines:_cleanupAll()
     local list = {}
     for p in pairs(self._entries) do list[#list + 1] = p end
     for _, p in ipairs(list) do self:_cleanup(p) end
+
+    -- Also clear any orphaned cones
+    local coneList = {}
+    for p in pairs(self._visionCones) do coneList[#coneList + 1] = p end
+    for _, p in ipairs(coneList) do self:_destroyVisionCone(p) end
+
     pcall(function() self._edgeIndicators:clearTargets() end)
     pcall(function() self:_publishClearAll() end)
 end
@@ -549,7 +811,7 @@ function ViewLines:_ensureEntry(player, myRoot)
     local e = self._entries[player]
     if e
         and e.viewerHead == head
-        and e.myRoot     == myRoot
+        and e.myRoot == myRoot
         and e.viewerHead.Parent
         and e.myRoot.Parent
     then
@@ -559,84 +821,77 @@ function ViewLines:_ensureEntry(player, myRoot)
 
     local cfg = self.config
 
-    -- --- Sight beam ---
     local sa = Instance.new("Attachment"); sa.Parent = head
     local sb = Instance.new("Attachment"); sb.Parent = myRoot
 
     local sight = Instance.new("Beam")
-    sight.Attachment0    = sa
-    sight.Attachment1    = sb
-    sight.FaceCamera     = true
-    sight.LightEmission  = 1
+    sight.Attachment0 = sa
+    sight.Attachment1 = sb
+    sight.FaceCamera = true
+    sight.LightEmission = 1
     sight.LightInfluence = 0
-    sight.Width0         = cfg.BLOCKED_WIDTH
-    sight.Width1         = cfg.BLOCKED_WIDTH
-    sight.Color          = ColorSequence.new(cfg.BLOCKED_COLOR)
-    sight.Transparency   = NumberSequence.new(cfg.SIGHT_ALPHA_UNVIEWED)
-    sight.Parent         = workspace
+    sight.Width0 = cfg.BLOCKED_WIDTH
+    sight.Width1 = cfg.BLOCKED_WIDTH
+    sight.Color = ColorSequence.new(cfg.BLOCKED_COLOR)
+    sight.Transparency = NumberSequence.new(cfg.SIGHT_ALPHA_UNVIEWED)
+    sight.Parent = workspace
 
-    -- --- Look beam (attachments in head-local space) ---
     local lookFace = Instance.new("Attachment")
     lookFace.Position = Vector3.new(0, 0, -head.Size.Z * 0.5)
-    lookFace.Parent   = head
+    lookFace.Parent = head
 
     local lookTip = Instance.new("Attachment")
     lookTip.Position = Vector3.new(0, 0, -head.Size.Z * 0.5 - cfg.LOOK_RANGE)
-    lookTip.Parent   = head
+    lookTip.Parent = head
 
     local lookBeam = Instance.new("Beam")
-    lookBeam.Attachment0    = lookFace
-    lookBeam.Attachment1    = lookTip
-    lookBeam.FaceCamera     = true
-    lookBeam.LightEmission  = 1
+    lookBeam.Attachment0 = lookFace
+    lookBeam.Attachment1 = lookTip
+    lookBeam.FaceCamera = true
+    lookBeam.LightEmission = 1
     lookBeam.LightInfluence = 0
-    lookBeam.Width0         = cfg.LOOK_WIDTH
-    lookBeam.Width1         = cfg.LOOK_WIDTH
-    lookBeam.Color          = ColorSequence.new(cfg.LOOK_COLOR)
-    lookBeam.Transparency   = NumberSequence.new(cfg.LOOK_TRANSPARENCY_NEAR)
-    lookBeam.Parent         = workspace
+    lookBeam.Width0 = cfg.LOOK_WIDTH
+    lookBeam.Width1 = cfg.LOOK_WIDTH
+    lookBeam.Color = ColorSequence.new(cfg.LOOK_COLOR)
+    lookBeam.Transparency = NumberSequence.new(cfg.LOOK_TRANSPARENCY_NEAR)
+    lookBeam.Parent = workspace
 
-    -- --- Sniper dot ---
     local dotPart
     if cfg.LOOK_DOT_ENABLED then
         dotPart = Instance.new("Part")
-        dotPart.Shape        = Enum.PartType.Ball
-        dotPart.Size         = Vector3.new(cfg.LOOK_DOT_SIZE, cfg.LOOK_DOT_SIZE, cfg.LOOK_DOT_SIZE)
-        dotPart.Anchored     = true
-        dotPart.CanCollide   = false
-        dotPart.CanQuery     = false
-        dotPart.CanTouch     = false
-        dotPart.CastShadow   = false
-        dotPart.Material     = Enum.Material.Neon
-        dotPart.Color        = cfg.LOOK_COLOR
+        dotPart.Shape = Enum.PartType.Ball
+        dotPart.Size = Vector3.new(cfg.LOOK_DOT_SIZE, cfg.LOOK_DOT_SIZE, cfg.LOOK_DOT_SIZE)
+        dotPart.Anchored = true
+        dotPart.CanCollide = false
+        dotPart.CanQuery = false
+        dotPart.CanTouch = false
+        dotPart.CastShadow = false
+        dotPart.Material = Enum.Material.Neon
+        dotPart.Color = cfg.LOOK_COLOR
         dotPart.Transparency = cfg.LOOK_DOT_ALPHA
-        dotPart.Parent       = workspace
+        dotPart.Parent = workspace
     end
 
     local entry = {
         sightBeam = sight, sightAttViewer = sa, sightAttMine = sb,
         viewerHead = head, myRoot = myRoot,
         lookBeam = lookBeam, lookAttFace = lookFace, lookAttTip = lookTip,
-        dotPart  = dotPart,
+        dotPart = dotPart,
     }
     self._entries[player] = entry
     return entry
 end
 
---------------------------------------------------------------------------------
--- VISIBILITY FRACTION
---------------------------------------------------------------------------------
 function ViewLines:_evaluateVisibility(viewerChar, viewerHead, myChar, mySamples)
     if #mySamples == 0 then return 0 end
-
     local eye, look = eyeOf(viewerHead)
-    local params    = self:_rayParams(viewerChar)
-    local cosHalf   = math.cos(math.rad(self.config.FOV_DEGREES * 0.5))
-    local hits      = 0
+    local params = self:_rayParams(viewerChar)
+    local cosHalf = math.cos(math.rad(self.config.FOV_DEGREES * 0.5))
+    local hits = 0
 
     for _, s in ipairs(mySamples) do
         local toSample = s.pos - eye
-        local dist     = toSample.Magnitude
+        local dist = toSample.Magnitude
         if dist > 0.001 then
             local dir = toSample / dist
             if look:Dot(dir) >= cosHalf then
@@ -650,20 +905,17 @@ function ViewLines:_evaluateVisibility(viewerChar, viewerHead, myChar, mySamples
     return hits / #mySamples
 end
 
---------------------------------------------------------------------------------
--- LOOK BEAM HIT TEST (capsule vs. my sample points)
---------------------------------------------------------------------------------
 function ViewLines:_lookBeamHitsMe(viewerChar, viewerHead, myChar, mySamples)
     local eye, look = eyeOf(viewerHead)
-    local range     = self.config.LOOK_RANGE
-    local radius    = self.config.LOOK_HIT_RADIUS
-    local params    = self:_rayParams(viewerChar)
+    local range = self.config.LOOK_RANGE
+    local radius = self.config.LOOK_HIT_RADIUS
+    local params = self:_rayParams(viewerChar)
 
     for _, s in ipairs(mySamples) do
         local toSample = s.pos - eye
-        local t        = math.clamp(toSample:Dot(look), 0, range)
-        local closest  = eye + look * t
-        local d        = (s.pos - closest).Magnitude
+        local t = math.clamp(toSample:Dot(look), 0, range)
+        local closest = eye + look * t
+        local d = (s.pos - closest).Magnitude
 
         if d <= s.radius + radius then
             local res = workspace:Raycast(eye, s.pos - eye, params)
@@ -675,54 +927,37 @@ function ViewLines:_lookBeamHitsMe(viewerChar, viewerHead, myChar, mySamples)
     return false
 end
 
---------------------------------------------------------------------------------
--- LOOK GEOMETRY: tip clamp + dot placement. Returns (endWorld, length).
---------------------------------------------------------------------------------
 function ViewLines:_updateLookGeometry(entry, viewerHead, viewerChar)
     local cfg = self.config
     local eye, look = eyeOf(viewerHead)
-
     local length = cfg.LOOK_RANGE
     if cfg.LOOK_CLAMP_TO_WALL then
         local params = self:_rayParams(viewerChar)
         local res = workspace:Raycast(eye, look * cfg.LOOK_RANGE, params)
-        if res then
-            length = (res.Position - eye).Magnitude
-        end
+        if res then length = (res.Position - eye).Magnitude end
     end
-
     local endWorld = eye + look * length
     entry.lookAttTip.Position = viewerHead.CFrame:PointToObjectSpace(endWorld)
-
     if entry.dotPart and entry.dotPart.Parent then
         entry.dotPart.CFrame = CFrame.new(endWorld)
     end
-
     return endWorld, length
 end
 
---------------------------------------------------------------------------------
--- APPEARANCE
---------------------------------------------------------------------------------
--- Sight beam: color, width, and transparency all driven by visibility
--- fraction, so a viewer who sees more of you produces a more prominent beam.
 function ViewLines:_applySightAppearance(beam, vis)
     local cfg = self.config
-
     local color, width, transparency
-
     if vis <= 0 then
-        color        = cfg.BLOCKED_COLOR
-        width        = cfg.BLOCKED_WIDTH
+        color = cfg.BLOCKED_COLOR
+        width = cfg.BLOCKED_WIDTH
         transparency = cfg.SIGHT_ALPHA_UNVIEWED
     elseif vis >= 1 then
-        color        = cfg.VISIBLE_COLOR
-        width        = cfg.VISIBLE_WIDTH
+        color = cfg.VISIBLE_COLOR
+        width = cfg.VISIBLE_WIDTH
         transparency = cfg.SIGHT_ALPHA_VIEWED
     else
-        color        = cfg.BLOCKED_COLOR:Lerp(cfg.VISIBLE_COLOR, vis)
-        width        = cfg.BLOCKED_WIDTH
-            + (cfg.VISIBLE_WIDTH - cfg.BLOCKED_WIDTH) * vis
+        color = cfg.BLOCKED_COLOR:Lerp(cfg.VISIBLE_COLOR, vis)
+        width = cfg.BLOCKED_WIDTH + (cfg.VISIBLE_WIDTH - cfg.BLOCKED_WIDTH) * vis
         transparency = cfg.SIGHT_ALPHA_UNVIEWED
             + (cfg.SIGHT_ALPHA_VIEWED - cfg.SIGHT_ALPHA_UNVIEWED) * vis
     end
@@ -731,61 +966,40 @@ function ViewLines:_applySightAppearance(beam, vis)
     local a1 = beam.Attachment1 and beam.Attachment1.WorldPosition
     transparency = applyBeamOcclusion(cfg, a0, a1, transparency)
 
-    beam.Color        = ColorSequence.new(color)
+    beam.Color = ColorSequence.new(color)
     beam.Transparency = NumberSequence.new(transparency)
-    beam.Width0       = width
-    beam.Width1       = width
+    beam.Width0 = width
+    beam.Width1 = width
 end
 
 function ViewLines:_applyLookAppearance(entry, hit, length)
-    local cfg   = self.config
+    local cfg = self.config
     local color = hit and cfg.LOOK_HIT_COLOR or cfg.LOOK_COLOR
-
     entry.lookBeam.Color = ColorSequence.new(color)
 
     local ratio = math.clamp(length / math.max(cfg.LOOK_RANGE, 1e-3), 0, 1)
-    local tipT  = cfg.LOOK_TRANSPARENCY_NEAR
-                + (cfg.LOOK_TRANSPARENCY_FAR - cfg.LOOK_TRANSPARENCY_NEAR) * ratio
+    local tipT = cfg.LOOK_TRANSPARENCY_NEAR
+        + (cfg.LOOK_TRANSPARENCY_FAR - cfg.LOOK_TRANSPARENCY_NEAR) * ratio
+
+    local a0 = entry.lookAttFace and entry.lookAttFace.WorldPosition
+    local a1 = entry.lookAttTip and entry.lookAttTip.WorldPosition
+
+    local nearT = cfg.LOOK_TRANSPARENCY_NEAR
+    local occludedNear = applyBeamOcclusion(cfg, a0, a1, nearT)
 
     entry.lookBeam.Transparency = NumberSequence.new({
-        NumberSequenceKeypoint.new(0, cfg.LOOK_TRANSPARENCY_NEAR),
+        NumberSequenceKeypoint.new(0, occludedNear),
         NumberSequenceKeypoint.new(1, tipT),
     })
 
-    -- Beam occlusion for both the beam and the sniper dot
-    local a0 = entry.lookAttFace and entry.lookAttFace.WorldPosition
-    local a1 = entry.lookAttTip  and entry.lookAttTip.WorldPosition
-
-    if entry.lookBeam then
-        local baseT = cfg.LOOK_TRANSPARENCY_NEAR
-        -- For the beam we only occlude the near-end value; the tip gradient
-        -- is intentionally unaffected so the fade-vs-distance still reads.
-        -- Re-derive the near endpoint transparency by peeking at the current
-        -- NumberSequence, then occlude just that keypoint.
-        local currentSeq = entry.lookBeam.Transparency
-        local nearT = currentSeq.Keypoints[1].Value
-        local farT  = currentSeq.Keypoints[2].Value
-        local occludedNear = applyBeamOcclusion(cfg, a0, a1, nearT)
-
-        entry.lookBeam.Transparency = NumberSequence.new({
-            NumberSequenceKeypoint.new(0, occludedNear),
-            NumberSequenceKeypoint.new(1, farT),
-        })
-    end
-
     if entry.dotPart and entry.dotPart.Parent then
         entry.dotPart.Color = color
-        local baseDot = cfg.LOOK_DOT_ALPHA
-        entry.dotPart.Transparency = applyBeamOcclusion(cfg, a0, a1, baseDot)
+        entry.dotPart.Transparency = applyBeamOcclusion(cfg, a0, a1, cfg.LOOK_DOT_ALPHA)
     end
 end
 
---------------------------------------------------------------------------------
--- EDGE INDICATOR DECISION (per viewer, per frame)
---------------------------------------------------------------------------------
 function ViewLines:_updateEdgeIndicator(player, theirChar, hit, vis)
     local cfg = self.config
-
     if not cfg.EDGE_INDICATORS then
         self._edgeIndicators:removeTarget(player)
         return
@@ -793,13 +1007,9 @@ function ViewLines:_updateEdgeIndicator(player, theirChar, hit, vis)
 
     local mode = cfg.EDGE_INDICATOR_MODE
     local qualifies
-    if mode == "Aimed" then
-        qualifies = hit
-    elseif mode == "Visible" then
-        qualifies = vis > 0.001
-    else
-        qualifies = true
-    end
+    if mode == "Aimed" then qualifies = hit
+    elseif mode == "Visible" then qualifies = vis > 0.001
+    else qualifies = true end
 
     if not qualifies then
         self._edgeIndicators:removeTarget(player)
@@ -817,32 +1027,56 @@ function ViewLines:_updateEdgeIndicator(player, theirChar, hit, vis)
     end
 
     local _, onScreen = cam:WorldToViewportPoint(viewerRoot.Position)
-    local camSpace     = cam.CFrame:PointToObjectSpace(viewerRoot.Position)
-    local behind       = camSpace.Z >= 0
+    local camSpace = cam.CFrame:PointToObjectSpace(viewerRoot.Position)
+    local behind = camSpace.Z >= 0
 
     if (not onScreen) or behind then
-        -- Opacity flips on EITHER signal: look beam hit, OR sight beam
-        -- shows enough of us. Size boost only follows the look beam.
         local sightSeen = vis >= cfg.EDGE_NAME_SIGHT_THRESHOLD
-
+        local tc = getTeamColorOf(player) or Color3.fromRGB(235, 235, 235)
         self._edgeIndicators:addTarget(player, {
-            Color     = hit and cfg.EDGE_ARROW_ALERT_COLOR or cfg.EDGE_ARROW_COLOR,
-            Alpha     = cfg.EDGE_ARROW_ALPHA,
-            NameColor = teamColorOf(player),
-            Viewing   = hit or sightSeen,
-            Aiming    = hit,
+            Color = hit and cfg.EDGE_ARROW_ALERT_COLOR or cfg.EDGE_ARROW_COLOR,
+            Alpha = cfg.EDGE_ARROW_ALPHA,
+            NameColor = tc,
+            Viewing = hit or sightSeen,
+            Aiming = hit,
         })
     else
         self._edgeIndicators:removeTarget(player)
     end
 end
 
---------------------------------------------------------------------------------
--- PUBLIC: update()
---------------------------------------------------------------------------------
+-- ─── Vision cone priority selection ───────────────────────────────────
+function ViewLines:_selectConePlayers(candidates, myRoot)
+    local cfg = self.config
+    if not cfg.VISION_CONE_ENABLED then return {} end
+    if not myRoot then return {} end
+
+    local actRange = cfg.VISION_CONE_ACTIVATION_RANGE
+    local eligible = {}
+
+    for _, c in ipairs(candidates) do
+        local theirChar = c.player.Character
+        local theirRoot = theirChar and theirChar:FindFirstChild("HumanoidRootPart")
+        if theirRoot then
+            local dist = (myRoot.Position - theirRoot.Position).Magnitude
+            if actRange <= 0 or dist <= actRange then
+                eligible[#eligible + 1] = { player = c.player, distance = dist }
+            end
+        end
+    end
+
+    table.sort(eligible, function(a, b) return a.distance < b.distance end)
+
+    local picked = {}
+    for i = 1, math.min(#eligible, cfg.VISION_CONE_MAX_PLAYERS) do
+        picked[eligible[i].player] = true
+    end
+    return picked
+end
+
+-- ─── Main update ──────────────────────────────────────────────────────
 function ViewLines:update()
     local cfg = self.config
-
     local myChar = LocalPlayer.Character
     local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
     if not myChar or not myRoot then
@@ -856,8 +1090,7 @@ function ViewLines:update()
     -- Stale sweep
     local stale = {}
     for player, e in pairs(self._entries) do
-        if not player.Parent
-            or not player.Character
+        if not player.Parent or not player.Character
             or e.myRoot ~= myRoot
             or not e.viewerHead.Parent
             or not e.myRoot.Parent
@@ -868,6 +1101,9 @@ function ViewLines:update()
     for _, player in ipairs(stale) do
         self:_cleanup(player)
     end
+
+    -- First pass: build entries, compute hits, gather cone candidates
+    local coneCandidates = {}
 
     for _, player in ipairs(Players:GetPlayers()) do
         if player ~= LocalPlayer then
@@ -881,7 +1117,7 @@ function ViewLines:update()
                         local theirRoot = theirChar:FindFirstChild("HumanoidRootPart")
                         if theirRoot then
                             distOk = (myRoot.Position - theirRoot.Position).Magnitude
-                                     <= cfg.MAX_DISTANCE
+                                <= cfg.MAX_DISTANCE
                         end
                     end
 
@@ -890,23 +1126,14 @@ function ViewLines:update()
                         if e then
                             local head = e.viewerHead
 
-                            -- Look beam: geometry + hit + appearance
                             local _, length = self:_updateLookGeometry(e, head, theirChar)
-                            local hit = self:_lookBeamHitsMe(
-                                theirChar, head, myChar, mySamples
-                            )
+                            local hit = self:_lookBeamHitsMe(theirChar, head, myChar, mySamples)
                             self:_applyLookAppearance(e, hit, length)
 
-                            -- Visibility fraction
-                            local vis = self:_evaluateVisibility(
-                                theirChar, head, myChar, mySamples
-                            )
+                            local vis = self:_evaluateVisibility(theirChar, head, myChar, mySamples)
 
-                            -- Publish to bus for other modules
                             self:_publishToBus(player, hit, vis)
 
-                            -- Sight beam: hide it when the look beam
-                            -- already says "I'm being aimed at".
                             if cfg.HIDE_SIGHT_WHEN_AIMED and hit then
                                 e.sightBeam.Enabled = false
                             else
@@ -914,8 +1141,15 @@ function ViewLines:update()
                                 self:_applySightAppearance(e.sightBeam, vis)
                             end
 
-                            -- Off-screen arrow
                             self:_updateEdgeIndicator(player, theirChar, hit, vis)
+
+                            -- Candidate for a vision cone
+                            if cfg.VISION_CONE_ENABLED then
+                                coneCandidates[#coneCandidates + 1] = {
+                                    player = player,
+                                    hit = hit,
+                                }
+                            end
                         end
                     end
                 end
@@ -923,12 +1157,39 @@ function ViewLines:update()
         end
     end
 
+    -- Second pass: vision cones for the top N closest candidates
+    if cfg.VISION_CONE_ENABLED then
+        local picked = self:_selectConePlayers(coneCandidates, myRoot)
+
+        -- Update picked cones
+        for _, c in ipairs(coneCandidates) do
+            if picked[c.player] then
+                local e = self._entries[c.player]
+                if e then
+                    self:_updateVisionCone(c.player, e, c.hit)
+                end
+            else
+                self:_destroyVisionCone(c.player)
+            end
+        end
+
+        -- Clean up cones for players no longer in the entries table
+        for player in pairs(self._visionCones) do
+            if not self._entries[player] then
+                self:_destroyVisionCone(player)
+            end
+        end
+    else
+        -- Vision cones disabled: clean up any existing ones
+        for player in pairs(self._visionCones) do
+            self:_destroyVisionCone(player)
+        end
+    end
+
     pcall(function() self._edgeIndicators:update() end)
 end
 
---------------------------------------------------------------------------------
--- PUBLIC: start / stop / setConfig / destroy
---------------------------------------------------------------------------------
+-- ─── Lifecycle ────────────────────────────────────────────────────────
 function ViewLines:start()
     if self._running then return end
     self._running = true
@@ -949,6 +1210,7 @@ function ViewLines:start()
 
     self:_track(Players.PlayerRemoving:Connect(function(player)
         self:_cleanup(player)
+        self:_destroyVisionCone(player)
     end))
 
     self:_track(UserInputService.InputBegan:Connect(function(input, gp)
@@ -964,44 +1226,39 @@ function ViewLines:stop()
     for i = #self._connections, 1, -1 do
         local c = self._connections[i]
         self._connections[i] = nil
-        if typeof(c) == "RBXScriptConnection" then
-            c:Disconnect()
-        end
+        if typeof(c) == "RBXScriptConnection" then c:Disconnect() end
     end
     self._connections = {}
-    pcall(function() self:_cleanupAll() end)
+    self:_cleanupAll()
     pcall(function() self._edgeIndicators:stop() end)
     self._running = false
 end
 
-function ViewLines:destroy()
-    self:stop()
-end
+function ViewLines:destroy() self:stop() end
 
 function ViewLines:setConfig(partial)
     if not partial then return end
-    for k, v in pairs(partial) do
-        self.config[k] = v
-    end
+    for k, v in pairs(partial) do self.config[k] = v end
 
     local cfg = self.config
     local sei = self._edgeIndicators
     if sei then
-        sei.config.PADDING           = cfg.EDGE_PADDING
-        sei.config.ARROW_SIZE        = cfg.EDGE_ARROW_SIZE
-        sei.config.ARROW_COLOR       = cfg.EDGE_ARROW_COLOR
-        sei.config.ARROW_ALPHA       = cfg.EDGE_ARROW_ALPHA
-        sei.config.SHOW_NAME         = cfg.EDGE_SHOW_NAME
-        sei.config.NAME_SIZE         = cfg.EDGE_NAME_SIZE
-        sei.config.NAME_SIZE_VIEWED  = cfg.EDGE_NAME_SIZE_VIEWED
-        sei.config.NAME_COLOR        = cfg.EDGE_NAME_COLOR
-        sei.config.NAME_ALPHA        = cfg.EDGE_NAME_ALPHA
+        sei.config.PADDING = cfg.EDGE_PADDING
+        sei.config.ARROW_SIZE = cfg.EDGE_ARROW_SIZE
+        sei.config.ARROW_COLOR = cfg.EDGE_ARROW_COLOR
+        sei.config.ARROW_ALPHA = cfg.EDGE_ARROW_ALPHA
+        sei.config.SHOW_NAME = cfg.EDGE_SHOW_NAME
+        sei.config.NAME_SIZE = cfg.EDGE_NAME_SIZE
+        sei.config.NAME_SIZE_VIEWED = cfg.EDGE_NAME_SIZE_VIEWED
+        sei.config.NAME_COLOR = cfg.EDGE_NAME_COLOR
+        sei.config.NAME_ALPHA = cfg.EDGE_NAME_ALPHA
         sei.config.NAME_ALPHA_VIEWED = cfg.EDGE_NAME_ALPHA_VIEWED
+        sei.config.NAME_MODE = cfg.NAME_MODE
+        sei.config.NAME_TRUNCATE_USERNAME = cfg.NAME_TRUNCATE_USERNAME
+        sei.config.NAME_TRUNCATE_DISPLAYNAME = cfg.NAME_TRUNCATE_DISPLAYNAME
     end
 end
 
-function ViewLines:isRunning()
-    return self._running
-end
+function ViewLines:isRunning() return self._running end
 
 return ViewLines
