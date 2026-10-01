@@ -4,12 +4,15 @@
     edge arrows and physical vision cones anchored to the head.
 
     Vision cones:
-      • 2D: two Prism meshes forming a triangular footprint on the ground
-      • 3D: Pyramid with apex at the head
+      • 2D: fan of rectangular strips forming a triangle on the ground
+      • 3D: radial spoke envelope forming a cone volume
       • Optional per-cone Highlight
       • Team colors, inverse hit color, in-house fallback
       • Priority selection by distance (max 8 by default)
       • Optional terrain conform (pitch only)
+
+    Uses plain Parts only — no SpecialMesh — for compatibility with
+    executors that don't render Prism/Pyramid meshes.
 
     No side effects on require. No auto-start, no print, no global.
 ]]
@@ -26,7 +29,7 @@ local Camera      = workspace.CurrentCamera
 -- DEFAULTS
 --------------------------------------------------------------------------------
 local DEFAULTS = {
-    FOV_DEGREES = 120,
+    FOV_DEGREES = 90,
     SAMPLE_PARTS = {
         "Head",
         "UpperTorso", "LowerTorso", "Torso",
@@ -87,33 +90,46 @@ local DEFAULTS = {
     EDGE_NAME_SIGHT_THRESHOLD = 0.1,
 
     -- Vision cones
-    VISION_CONE_ENABLED        = true,
-    VISION_CONE_MODE           = "2D",
-    VISION_CONE_MAX_PLAYERS    = 8,
-    VISION_CONE_RANGE          = 20,
+    VISION_CONE_ENABLED          = true,
+    VISION_CONE_MODE             = "2D",        -- "2D" | "3D" | "Both"
+    VISION_CONE_MAX_PLAYERS      = 8,
+    VISION_CONE_RANGE            = 20,
     VISION_CONE_ACTIVATION_RANGE = 150,
 
-    VISION_CONE_COLOR_MODE     = "Team",
-    VISION_CONE_FIXED_COLOR    = Color3.fromRGB(255, 200, 80),
-    VISION_CONE_USE_FIXED_HIT  = false,
-    VISION_CONE_FIXED_HIT_COLOR = Color3.fromRGB(255, 60, 60),
+    VISION_CONE_COLOR_MODE       = "Team",      -- "Team" | "Fixed"
+    VISION_CONE_FIXED_COLOR      = Color3.fromRGB(255, 200, 80),
+    VISION_CONE_USE_FIXED_HIT    = false,
+    VISION_CONE_FIXED_HIT_COLOR  = Color3.fromRGB(255, 60, 60),
 
-    VISION_CONE_ALPHA_2D       = 0.7,
-    VISION_CONE_ALPHA_3D       = 0.85,
-    VISION_CONE_HIT_ALPHA_2D   = 0.4,
-    VISION_CONE_HIT_ALPHA_3D   = 0.65,
+    VISION_CONE_ALPHA_2D         = 0.5,
+    VISION_CONE_ALPHA_3D         = 0.85,
+    VISION_CONE_HIT_ALPHA_2D     = 0.2,
+    VISION_CONE_HIT_ALPHA_3D     = 0.65,
 
-    VISION_CONE_HIGHLIGHT      = true,
-    VISION_CONE_HIGHLIGHT_DEPTH = "Occluded",
-    VISION_CONE_GROUND_OFFSET  = 0.15,
+    VISION_CONE_HIGHLIGHT        = true,
+    VISION_CONE_HIGHLIGHT_DEPTH  = "Occluded",
+    VISION_CONE_GROUND_OFFSET    = 0.05,
 
-    VISION_CONE_CONFORM_TERRAIN = false,
-    VISION_CONE_CONFORM_RAYS    = 2,
+    VISION_CONE_CONFORM_TERRAIN  = false,
+    VISION_CONE_CONFORM_RAYS     = 2,
 
-    VISION_CONE_TILT_FADE      = true,
-    VISION_CONE_OCCLUDE_ENABLED = true,
+    VISION_CONE_TILT_FADE        = true,
+    VISION_CONE_OCCLUDE_ENABLED  = true,
     VISION_CONE_OCCLUDE_THRESHOLD = 0.85,
     VISION_CONE_OCCLUDE_MIN_ALPHA = 0.9,
+
+    -- 2D fan geometry
+    VISION_CONE_STRIP_COUNT      = 16,
+    VISION_CONE_STRIP_THICKNESS  = 0.08,
+    VISION_CONE_STRIP_OVERLAP    = 1.25,
+
+    -- 3D spoke envelope geometry
+    VISION_CONE_SPOKE_COUNT      = 24,
+    VISION_CONE_SPOKE_THICKNESS  = 0.06,
+
+    -- Material for cone parts. Neon is bright; try Glass or SmoothPlastic
+    -- for a subtler look.
+    VISION_CONE_MATERIAL         = Enum.Material.Neon,
 }
 
 --------------------------------------------------------------------------------
@@ -188,7 +204,7 @@ local function applyBeamOcclusion(cfg, worldA, worldB, baseAlpha)
 end
 
 --------------------------------------------------------------------------------
--- SEI (unchanged from V1.1)
+-- SEI
 --------------------------------------------------------------------------------
 local ScreenEdgeIndicators = {}
 ScreenEdgeIndicators.__index = ScreenEdgeIndicators
@@ -502,74 +518,68 @@ end
 function ViewLines:_destroyVisionCone(player)
     local vc = self._visionCones[player]
     if not vc then return end
-    for _, obj in ipairs({
-        vc.model, vc.highlight,
-        vc.prismLeft, vc.prismRight,
-        vc.part3D, vc.mesh3D,
-    }) do
+    for _, obj in ipairs(vc.parts or {}) do
         if obj then pcall(function() obj:Destroy() end) end
     end
+    if vc.highlight then pcall(function() vc.highlight:Destroy() end) end
+    if vc.model then pcall(function() vc.model:Destroy() end) end
     self._visionCones[player] = nil
 end
 
 function ViewLines:_createVisionCone(player)
     if self._visionCones[player] then return self._visionCones[player] end
     local cfg = self.config
-    local vc = {}
+    local vc = { parts = {}, strips = {}, spokes = {} }
 
     local model = Instance.new("Model")
     model.Name = "VisionCone_" .. player.Name
     model.Parent = workspace
     vc.model = model
 
-    -- ─── 2D: two Prism meshes forming a triangular footprint ───────────
+    local material = cfg.VISION_CONE_MATERIAL or Enum.Material.Neon
+
+    -- ─── 2D fan ────────────────────────────────────────────────────────
     if cfg.VISION_CONE_MODE == "2D" or cfg.VISION_CONE_MODE == "Both" then
-        local function makePrism(name)
+        for i = 1, cfg.VISION_CONE_STRIP_COUNT do
             local p = Instance.new("Part")
-            p.Name = name
+            p.Name = "Cone2D_Strip" .. i
             p.Anchored = true
             p.CanCollide = false
             p.CanQuery = false
             p.CanTouch = false
             p.CastShadow = false
-            p.Material = Enum.Material.Neon
+            p.Material = material
+            p.Color = cfg.VISION_CONE_FIXED_COLOR
             p.Transparency = cfg.VISION_CONE_ALPHA_2D
-            p.Color = Color3.fromRGB(255, 200, 80)
-            p.Size = Vector3.new(1, 1, 0.1)  -- X=base, Y=height, Z=thin (thickness)
-
-            local mesh = Instance.new("SpecialMesh")
-            mesh.MeshType = Enum.MeshType.Prism
-            mesh.Parent = p
-
+            p.Size = Vector3.new(1, cfg.VISION_CONE_STRIP_THICKNESS, 1)
             p.Parent = model
-            return p
+            vc.strips[i] = p
+            vc.parts[#vc.parts + 1] = p
         end
-
-        vc.prismLeft  = makePrism("Cone2D_Left")
-        vc.prismRight = makePrism("Cone2D_Right")
     end
 
-    -- ─── 3D: Pyramid from head ─────────────────────────────────────────
+    -- ─── 3D spoke envelope ─────────────────────────────────────────────
     if cfg.VISION_CONE_MODE == "3D" or cfg.VISION_CONE_MODE == "Both" then
-        local part = Instance.new("Part")
-        part.Name = "Cone3D"
-        part.Anchored = true
-        part.CanCollide = false
-        part.CanQuery = false
-        part.CanTouch = false
-        part.CastShadow = false
-        part.Material = Enum.Material.Neon
-        part.Transparency = cfg.VISION_CONE_ALPHA_3D
-        part.Size = Vector3.new(1, 1, 1)
-        part.Color = Color3.fromRGB(255, 200, 80)
-
-        local mesh = Instance.new("SpecialMesh")
-        mesh.MeshType = Enum.MeshType.Pyramid
-        mesh.Parent = part
-
-        part.Parent = model
-        vc.part3D = part
-        vc.mesh3D = mesh
+        for i = 1, cfg.VISION_CONE_SPOKE_COUNT do
+            local p = Instance.new("Part")
+            p.Name = "Cone3D_Spoke" .. i
+            p.Anchored = true
+            p.CanCollide = false
+            p.CanQuery = false
+            p.CanTouch = false
+            p.CastShadow = false
+            p.Material = material
+            p.Color = cfg.VISION_CONE_FIXED_COLOR
+            p.Transparency = cfg.VISION_CONE_ALPHA_3D
+            p.Size = Vector3.new(
+                cfg.VISION_CONE_SPOKE_THICKNESS,
+                cfg.VISION_CONE_SPOKE_THICKNESS,
+                1
+            )
+            p.Parent = model
+            vc.spokes[i] = p
+            vc.parts[#vc.parts + 1] = p
+        end
     end
 
     if cfg.VISION_CONE_HIGHLIGHT then
@@ -580,11 +590,17 @@ function ViewLines:_createVisionCone(player)
             or  Enum.HighlightDepthMode.Occluded
         hl.FillColor = cfg.VISION_CONE_FIXED_COLOR
         hl.OutlineColor = cfg.VISION_CONE_FIXED_COLOR
-        hl.FillTransparency = 0.8
+        hl.FillTransparency = 0.85
         hl.OutlineTransparency = 0.5
         hl.Parent = CoreGui
         vc.highlight = hl
     end
+
+    -- Cache for dirty-checking
+    vc.lastApex = nil
+    vc.lastFlat = nil
+    vc.lastRange = nil
+    vc.lastFov = nil
 
     self._visionCones[player] = vc
     return vc
@@ -655,8 +671,30 @@ function ViewLines:_updateVisionCone(player, entry, hit)
         head.Position.Z
     )
 
-    local halfFov = math.rad((cfg.FOV_DEGREES or 120) * 0.5)
+    local halfFov = math.rad((cfg.FOV_DEGREES or 90) * 0.5)
     local baseWidth = 2 * cfg.VISION_CONE_RANGE * math.tan(halfFov)
+
+    -- Dirty check: skip the CFrame writes if nothing moved meaningfully.
+    -- Position tolerance 0.1 studs, direction tolerance 0.01, geometry
+    -- changes force a rewrite.
+    local moved = true
+    if vc.lastApex and vc.lastFlat then
+        if (apexPos - vc.lastApex).Magnitude < 0.1
+            and (flat - vc.lastFlat).Magnitude < 0.01
+            and vc.lastRange == cfg.VISION_CONE_RANGE
+            and vc.lastFov == cfg.FOV_DEGREES
+        then
+            moved = false
+        end
+    end
+
+    -- Even if geometry is stationary, we still need to refresh colors
+    -- and transparency so the hit state can update. Those are cheap writes
+    -- compared to the CFrame math, so we do them every frame regardless.
+    local up = Vector3.new(0, 1, 0)
+    local right = flat:Cross(up)
+    if right.Magnitude < 0.1 then right = Vector3.new(1, 0, 0) end
+    right = right.Unit
 
     local tiltAlpha = 1
     if cfg.VISION_CONE_TILT_FADE then
@@ -665,64 +703,88 @@ function ViewLines:_updateVisionCone(player, entry, hit)
 
     local baseColor = self:_resolveConeColor(player, hit)
 
-    local up = Vector3.new(0, 1, 0)
-    local right = flat:Cross(up)
-    if right.Magnitude < 0.1 then right = Vector3.new(1, 0, 0) end
-    right = right.Unit
+    -- Occlusion uses the apex as the reference point so the entire cone
+    -- fades uniformly when the camera looks at the owner's head.
+    local occAlpha2D = self:_coneOcclusionAlpha(
+        (hit and cfg.VISION_CONE_HIT_ALPHA_2D or cfg.VISION_CONE_ALPHA_2D),
+        apexPos
+    )
+    local occAlpha3D = self:_coneOcclusionAlpha(
+        (hit and cfg.VISION_CONE_HIT_ALPHA_3D or cfg.VISION_CONE_ALPHA_3D),
+        apexPos
+    )
 
-    -- ─── 2D cone: two Prism meshes forming a triangular footprint ──────
-    -- Prism's triangle is in the part's local XY plane; extruded along
-    -- local Z. So orient local X and Y along the ground plane, and local
-    -- Z straight up. Then the triangle lies flat on the ground.
-    --
-    -- Right half: triangle with right-angle corner at apexPos, extending
-    --   along +flat (length R) and +right (half-width W/2).
-    -- Left half: mirror across the flat axis.
-    if vc.prismRight and vc.prismLeft then
-        local R = cfg.VISION_CONE_RANGE
-        local halfW = baseWidth * 0.5
+    local alpha2D = clamp(occAlpha2D + (1 - tiltAlpha), 0, 1)
+    local alpha3D = clamp(occAlpha3D + (1 - tiltAlpha), 0, 1)
 
-        -- Right half: X = flat, Y = right, Z = -up (right-handed frame)
-        local cfR = CFrame.fromMatrix(apexPos, flat, right, -up)
-        vc.prismRight.Size = Vector3.new(R, halfW, 0.1)
-        vc.prismRight.CFrame = cfR
+    -- ─── 2D fan ────────────────────────────────────────────────────────
+    if #vc.strips > 0 then
+        local N = cfg.VISION_CONE_STRIP_COUNT
+        local span = 2 * halfFov
+        local step = (N > 1) and (span / (N - 1)) or 0
+        local stripWidth = math.max(
+            cfg.VISION_CONE_RANGE * step * cfg.VISION_CONE_STRIP_OVERLAP,
+            0.5
+        )
 
-        -- Left half: mirror across flat axis -> flip local Y to -right
-        local cfL = CFrame.fromMatrix(apexPos, flat, -right, -up)
-        vc.prismLeft.Size = Vector3.new(R, halfW, 0.1)
-        vc.prismLeft.CFrame = cfL
+        for i = 1, N do
+            local strip = vc.strips[i]
+            if strip then
+                if moved then
+                    local angle = -halfFov + (i - 1) * step
+                    local dir = (CFrame.Angles(0, angle, 0) * flat)
 
-        local alpha2D = (hit and cfg.VISION_CONE_HIT_ALPHA_2D or cfg.VISION_CONE_ALPHA_2D)
-        alpha2D = clamp(alpha2D + (1 - tiltAlpha), 0, 1)
-        vc.prismLeft.Transparency  = alpha2D
-        vc.prismRight.Transparency = alpha2D
-        vc.prismLeft.Color  = baseColor
-        vc.prismRight.Color = baseColor
+                    strip.Size = Vector3.new(
+                        stripWidth,
+                        cfg.VISION_CONE_STRIP_THICKNESS,
+                        cfg.VISION_CONE_RANGE
+                    )
+
+                    local cf = CFrame.lookAt(apexPos, apexPos + dir)
+                    cf = cf + dir * (cfg.VISION_CONE_RANGE * 0.5)
+                    strip.CFrame = cf
+                end
+                strip.Transparency = alpha2D
+                strip.Color = baseColor
+            end
+        end
     end
 
-    -- ─── 3D cone: Pyramid with apex at head ────────────────────────────
-    if vc.part3D then
-        local yAxis = -flat
-        local xAxis = yAxis:Cross(Vector3.new(0, 1, 0))
-        if xAxis.Magnitude < 0.1 then
-            xAxis = yAxis:Cross(Vector3.new(1, 0, 0))
+    -- ─── 3D spoke envelope ─────────────────────────────────────────────
+    if #vc.spokes > 0 then
+        local N = cfg.VISION_CONE_SPOKE_COUNT
+        for i = 1, N do
+            local spoke = vc.spokes[i]
+            if spoke then
+                if moved then
+                    local yaw = (i - 1) * (2 * math.pi / N)
+                    local radial = right * math.cos(yaw) + up * math.sin(yaw)
+                    local spokeDir = (
+                        flat * math.cos(halfFov)
+                        + radial * math.sin(halfFov)
+                    ).Unit
+
+                    spoke.Size = Vector3.new(
+                        cfg.VISION_CONE_SPOKE_THICKNESS,
+                        cfg.VISION_CONE_SPOKE_THICKNESS,
+                        cfg.VISION_CONE_RANGE
+                    )
+
+                    local cf = CFrame.lookAt(apexPos, apexPos + spokeDir)
+                    cf = cf + spokeDir * (cfg.VISION_CONE_RANGE * 0.5)
+                    spoke.CFrame = cf
+                end
+                spoke.Transparency = alpha3D
+                spoke.Color = baseColor
+            end
         end
-        xAxis = xAxis.Unit
-        local zAxis = xAxis:Cross(yAxis).Unit
+    end
 
-        local pyramidLength = cfg.VISION_CONE_RANGE
-        local pyramidCenter = head.Position + flat * (pyramidLength * 0.5)
-
-        vc.part3D.Size = Vector3.new(baseWidth, pyramidLength, baseWidth)
-        vc.part3D.CFrame = CFrame.fromMatrix(pyramidCenter, xAxis, yAxis, zAxis)
-
-        local alpha3D = (hit and cfg.VISION_CONE_HIT_ALPHA_3D or cfg.VISION_CONE_ALPHA_3D)
-        if cfg.VISION_CONE_OCCLUDE_ENABLED then
-            alpha3D = self:_coneOcclusionAlpha(alpha3D, vc.part3D.Position)
-        end
-        alpha3D = clamp(alpha3D + (1 - tiltAlpha), 0, 1)
-        vc.part3D.Transparency = alpha3D
-        vc.part3D.Color = baseColor
+    if moved then
+        vc.lastApex = apexPos
+        vc.lastFlat = flat
+        vc.lastRange = cfg.VISION_CONE_RANGE
+        vc.lastFov = cfg.FOV_DEGREES
     end
 
     if vc.highlight then
@@ -851,7 +913,7 @@ function ViewLines:_ensureEntry(player, myRoot)
 end
 
 --------------------------------------------------------------------------------
--- VISIBILITY
+-- VISIBILITY / GEOMETRY / APPEARANCE
 --------------------------------------------------------------------------------
 function ViewLines:_evaluateVisibility(viewerChar, viewerHead, myChar, mySamples)
     if #mySamples == 0 then return 0 end
@@ -915,9 +977,6 @@ function ViewLines:_updateLookGeometry(entry, viewerHead, viewerChar)
     return endWorld, length
 end
 
---------------------------------------------------------------------------------
--- APPEARANCE
---------------------------------------------------------------------------------
 function ViewLines:_applySightAppearance(beam, vis)
     local cfg = self.config
     local color, width, transparency
