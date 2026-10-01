@@ -1,22 +1,18 @@
 --[[
-    ESP Module — ViewLines-aware, Figma-styled healthbar
+    ESP Module — standalone, bus-aware, with healthbar + format modes
 
-    Healthbar styles:
-      "Simple"  — BG + Fill + Number (original)
-      "Figma"   — full Figma design: outline, corners, track, fill,
-                  midline, dividers with extension, number
+    Reads ViewLines state from getgenv().ModuleBus.ViewLines to drive:
+      • Highlight fill transparency (base → sight → look)
+      • Nametag opacity      (base → sight → look)
+      • Nametag size         (base → sight → look)
+      • Nametag bolding      (look beam only)
+      • Camera-center override opacity
+      • Healthbar fill, background, and number opacity (mirrors nametag)
+      • Tool ESP (top line, above the display name)
 
-    Figma elements are scaled from HB_LENGTH using DESIGN_WIDTH = 204.
-    Sub-element sizes clamp to a 1px minimum to prevent disappearing at
-    small scales. Bar thickness is HB_THICKNESS independent of scale.
+    Screen-size scaling applies ONLY to the healthbar.
 
-    Vertical positions (Left/Right) rotate the whole bar 90° and
-    counter-rotate the number so it stays readable.
-
-    Usage:
-        local ESP = loadstring(game:HttpGet(URL))()
-        local esp = ESP.new({ ... })
-        esp:start()
+    No side effects on require. No auto-start, no print, no global.
 ]]
 
 local Players          = game:GetService("Players")
@@ -54,12 +50,26 @@ local DEFAULTS = {
 
     NT_HIDE_HP_IF_BAR_TEXT = true,
 
+    -- Tool ESP
+    ESP_SHOW_TOOL        = true,
+    ESP_TOOL_FORMAT      = "Brackets",     -- "Brackets" | "Plain"
+    ESP_TOOL_USE_TOOLTIP = false,          -- false = tool.Name, true = tool.ToolTip
+    ESP_TOOL_COLOR_MODE  = "White",        -- "White" | "Team" | "Fixed"
+    ESP_TOOL_FIXED_COLOR = Color3.fromRGB(255, 200, 80),
+    ESP_TOOL_SIZE_DELTA  = -2,             -- added to NT size, then scaled by HUD scale
+    ESP_TOOL_BOLD        = false,
+
     INTEGRATION_ENABLED = true,
     SIGHT_THRESHOLD     = 0.1,
 
     HL_BASE_TRANSPARENCY  = 0.7,
     HL_SIGHT_TRANSPARENCY = 0.4,
     HL_LOOK_TRANSPARENCY  = 0.1,
+
+    HL_OUTLINE_TRANSPARENCY       = 0.4,
+    HL_OUTLINE_SIGHT_TRANSPARENCY = 0.2,
+    HL_OUTLINE_LOOK_TRANSPARENCY  = 0.0,
+    HL_OUTLINE_DYNAMIC            = true,
 
     NT_ALPHA_BASE  = 0.6,
     NT_ALPHA_SIGHT = 0.3,
@@ -80,8 +90,7 @@ local DEFAULTS = {
     SCALE_MIN              = 0.5,
     SCALE_MAX              = 2.0,
 
-    -- ─── Healthbar ────────────────────────────────────────────────────
-    HB_STYLE             = "Figma",   -- "Simple" | "Figma"
+    HB_STYLE             = "Figma",
     HB_ENABLED           = true,
     HB_POSITION          = "Bottom",
     HB_LENGTH            = 90,
@@ -125,8 +134,6 @@ local DEFAULTS = {
     HB_NUMBER_COLOR      = Color3.fromRGB(255, 255, 255),
     HB_NUMBER_SHOW_MAX   = false,
 
-    -- ─── Figma style sub-config ──────────────────────────────────────
-    -- Design reference. All decorations scale from HB_LENGTH / DESIGN_WIDTH.
     HB_FIGMA = {
         DESIGN_WIDTH = 204,
 
@@ -142,7 +149,6 @@ local DEFAULTS = {
         TRACK_INSET_X = 3,
         TRACK_INSET_Y = 3,
 
-        -- BG is the depleted track. When false, fill floats directly.
         BG_ENABLED      = true,
         BG_COLOR        = Color3.fromRGB(45, 45, 45),
         BG_TRANSPARENCY = 0,
@@ -209,11 +215,6 @@ local function resolveHealthColor(pct, teamColor, cfg, mode)
     end
 end
 
--- px helper: at least 1 pixel so nothing disappears at small scales.
-local function px(v)
-    return math.max(1, math.floor(v + 0.5))
-end
-
 --------------------------------------------------------------------------------
 -- MODULE
 --------------------------------------------------------------------------------
@@ -227,7 +228,6 @@ function ESP.new(overrides)
     if overrides then
         for k, v in pairs(overrides) do
             if k == "HB_FIGMA" and type(v) == "table" then
-                -- Deep merge for HB_FIGMA
                 for kk, vv in pairs(v) do self.config.HB_FIGMA[kk] = vv end
             else
                 self.config[k] = v
@@ -267,6 +267,30 @@ function ESP:_getMaxHealth(character)
     local hum = character:FindFirstChildOfClass("Humanoid")
     if hum and hum.MaxHealth > 0 then return hum.MaxHealth end
     return 100
+end
+
+function ESP:_getEquippedToolName(character)
+    local cfg = self.config
+    if not cfg.ESP_SHOW_TOOL then return nil end
+    if not character then return nil end
+
+    -- Prefer the currently equipped tool (parented to character),
+    -- fall back to the humanoid's GetEquippedTool if that's clearer
+    local tool = character:FindFirstChildOfClass("Tool")
+    if not tool then
+        local hum = character:FindFirstChildOfClass("Humanoid")
+        if hum and typeof(hum.GetEquippedTool) == "function" then
+            local ok, equipped = pcall(function() return hum:GetEquippedTool() end)
+            if ok and equipped then tool = equipped end
+        end
+    end
+    if not tool then return nil end
+
+    local name = tool.Name
+    if cfg.ESP_TOOL_USE_TOOLTIP and tool.ToolTip and tool.ToolTip ~= "" then
+        name = tool.ToolTip
+    end
+    return name
 end
 
 function ESP:_getNameColor(player)
@@ -389,10 +413,17 @@ function ESP:_computeLayout(scale)
     local ntSize = self._activeNtSize or cfg.NT_SIZE_BASE
     local isVertical = (cfg.ESP_NAME_FORMAT == "Vertical")
 
+    -- Tool label height (0 if hidden)
+    local toolH = 0
+    if cfg.ESP_SHOW_TOOL then
+        local toolSize = math.max(6, ntSize + (cfg.ESP_TOOL_SIZE_DELTA or 0))
+        toolH = toolSize + 6
+    end
+
     local nameH = ntSize + 6
     local subH  = isVertical and (ntSize + 4) or 0
     local lineSpacing = isVertical and (cfg.NT_LINE_SPACING or 0) or 0
-    local textH = nameH + subH + lineSpacing
+    local textH = toolH + nameH + subH + lineSpacing
     local textW = cfg.ESP_NAME_WIDTH
 
     local hb = {
@@ -414,19 +445,15 @@ function ESP:_computeLayout(scale)
         bbH = math.max(textH, hb.len)
     end
 
-    return bbW, bbH, textW, textH, nameH, subH, hb, lineSpacing
+    return bbW, bbH, textW, textH, nameH, subH, hb, lineSpacing, toolH
 end
 
 --------------------------------------------------------------------------------
 -- HEALTHBAR BUILDERS
 --------------------------------------------------------------------------------
--- Simple style: BG + Fill + Number (original)
 function ESP:_buildSimpleBar(parent, cfg, scale)
     local refs = {}
-    local isVertical = (cfg.HB_POSITION == "Top" or cfg.HB_POSITION == "Bottom")
 
-    -- For simplicity the simple style still uses local W/H tracking.
-    -- Bar dimensions are set during layout.
     local back = Instance.new("Frame")
     back.Name                   = "HB_Back"
     back.BackgroundColor3       = cfg.HB_BG_COLOR
@@ -475,25 +502,20 @@ function ESP:_buildSimpleBar(parent, cfg, scale)
         number.Parent                 = parent
     end
 
-    refs.style    = "Simple"
-    refs.Back     = back
-    refs.Fill     = fill
-    refs.Number   = number
+    refs.style  = "Simple"
+    refs.Back   = back
+    refs.Fill   = fill
+    refs.Number = number
     return refs
 end
 
--- Figma style: full design from the standalone mockup, parameterized by scale.
--- Returns refs table with all created instances for later updates.
 function ESP:_buildFigmaBar(parent, cfg, scale)
     local F = cfg.HB_FIGMA
     local refs = {}
 
-    -- Design reference scaling. All decorations scale by `s`. Clamp to 1px min.
     local s = math.max(scale * (cfg.HB_LENGTH / F.DESIGN_WIDTH), 0.05)
     local function dpx(v) return math.max(1, math.floor(v * s + 0.5)) end
 
-    -- Outer container for the whole Figma healthbar. This is what rotates
-    -- for vertical positions.
     local barW = cfg.HB_LENGTH * scale
     local barH = cfg.HB_THICKNESS * scale
 
@@ -505,16 +527,12 @@ function ESP:_buildFigmaBar(parent, cfg, scale)
     hbRoot.AnchorPoint            = Vector2.new(0.5, 0.5)
     hbRoot.Parent                 = parent
 
-    -- Orientation: rotate 90° for Left/Right
     local isVertical = (cfg.HB_POSITION == "Left" or cfg.HB_POSITION == "Right")
     hbRoot.Rotation = isVertical and 90 or 0
 
-    -- TrackRegion: interior inset container
     local insetX = dpx(F.TRACK_INSET_X)
     local insetY = dpx(F.TRACK_INSET_Y)
 
-    -- For a rotated (vertical) bar, the LOCAL width/height are still the
-    -- horizontal layout. Rotation handles presentation.
     local container = Instance.new("Frame")
     container.Name                   = "FigmaContainer"
     container.BackgroundTransparency = 1
@@ -522,7 +540,6 @@ function ESP:_buildFigmaBar(parent, cfg, scale)
     container.Position               = UDim2.fromOffset(0, 0)
     container.Parent                 = hbRoot
 
-    -- BG (track)
     local trackW = barW - insetX * 2
     local trackH = barH - insetY * 2
     if trackW < 1 then trackW = 1 end
@@ -540,7 +557,6 @@ function ESP:_buildFigmaBar(parent, cfg, scale)
         bg.Parent                 = container
     end
 
-    -- Fill (HP-colored) — parented to container so it floats over BG
     local fill = Instance.new("Frame")
     fill.Name                   = "Fill"
     fill.BackgroundColor3       = Color3.fromRGB(0, 255, 0)
@@ -549,7 +565,6 @@ function ESP:_buildFigmaBar(parent, cfg, scale)
     fill.Size                   = UDim2.fromOffset(trackW, trackH)
     fill.Parent                 = container
 
-    -- Midline
     if F.MIDLINE_ENABLED then
         local mh = dpx(F.MIDLINE_HEIGHT)
         local mid = Instance.new("Frame")
@@ -564,7 +579,6 @@ function ESP:_buildFigmaBar(parent, cfg, scale)
         mid.Parent                 = container
     end
 
-    -- Dividers with extension above/below track
     local dividers = {}
     if F.DIVIDER_COUNT and F.DIVIDER_COUNT > 1 then
         local dw = dpx(F.DIVIDER_WIDTH)
@@ -587,7 +601,6 @@ function ESP:_buildFigmaBar(parent, cfg, scale)
         end
     end
 
-    -- Outline (4 frames)
     local outlineFrames = {}
     if F.OUTLINE_ENABLED then
         local T = dpx(F.OUTLINE_THICKNESS)
@@ -604,17 +617,12 @@ function ESP:_buildFigmaBar(parent, cfg, scale)
             outlineFrames[#outlineFrames + 1] = f
         end
 
-        makeOutline("OutlineTop",    UDim2.fromOffset(0, 0),
-            UDim2.fromOffset(barW, T))
-        makeOutline("OutlineBottom", UDim2.fromOffset(0, barH - T),
-            UDim2.fromOffset(barW, T))
-        makeOutline("OutlineLeft",   UDim2.fromOffset(0, 0),
-            UDim2.fromOffset(T, barH))
-        makeOutline("OutlineRight",  UDim2.fromOffset(barW - T, 0),
-            UDim2.fromOffset(T, barH))
+        makeOutline("OutlineTop",    UDim2.fromOffset(0, 0), UDim2.fromOffset(barW, T))
+        makeOutline("OutlineBottom", UDim2.fromOffset(0, barH - T), UDim2.fromOffset(barW, T))
+        makeOutline("OutlineLeft",   UDim2.fromOffset(0, 0), UDim2.fromOffset(T, barH))
+        makeOutline("OutlineRight",  UDim2.fromOffset(barW - T, 0), UDim2.fromOffset(T, barH))
     end
 
-    -- Corner brackets (8 frames)
     local cornerFrames = {}
     if F.CORNER_ENABLED then
         local CS = dpx(F.CORNER_SIZE)
@@ -634,18 +642,14 @@ function ESP:_buildFigmaBar(parent, cfg, scale)
 
         makeCorner("CornerTL_H", UDim2.fromOffset(0, 0), UDim2.fromOffset(CS, CT))
         makeCorner("CornerTL_V", UDim2.fromOffset(0, 0), UDim2.fromOffset(CT, CS))
-
         makeCorner("CornerTR_H", UDim2.fromOffset(barW - CS, 0), UDim2.fromOffset(CS, CT))
         makeCorner("CornerTR_V", UDim2.fromOffset(barW - CT, 0), UDim2.fromOffset(CT, CS))
-
         makeCorner("CornerBL_H", UDim2.fromOffset(0, barH - CT), UDim2.fromOffset(CS, CT))
         makeCorner("CornerBL_V", UDim2.fromOffset(0, barH - CS), UDim2.fromOffset(CT, CS))
-
         makeCorner("CornerBR_H", UDim2.fromOffset(barW - CS, barH - CT), UDim2.fromOffset(CS, CT))
         makeCorner("CornerBR_V", UDim2.fromOffset(barW - CT, barH - CS), UDim2.fromOffset(CT, CS))
     end
 
-    -- Number (counter-rotated if bar is vertical so it stays readable)
     local number
     if cfg.HB_SHOW_NUMBER then
         number = Instance.new("TextLabel")
@@ -667,19 +671,19 @@ function ESP:_buildFigmaBar(parent, cfg, scale)
         number.Parent                 = container
     end
 
-    refs.style    = "Figma"
-    refs.Root     = hbRoot
-    refs.Container= container
-    refs.BG       = bg
-    refs.Fill     = fill
-    refs.Dividers = dividers
-    refs.Outlines = outlineFrames
-    refs.Corners  = cornerFrames
-    refs.Number   = number
-    refs.TrackW   = trackW
-    refs.TrackH   = trackH
-    refs.InsetX   = insetX
-    refs.InsetY   = insetY
+    refs.style     = "Figma"
+    refs.Root      = hbRoot
+    refs.Container = container
+    refs.BG        = bg
+    refs.Fill      = fill
+    refs.Dividers  = dividers
+    refs.Outlines  = outlineFrames
+    refs.Corners   = cornerFrames
+    refs.Number    = number
+    refs.TrackW    = trackW
+    refs.TrackH    = trackH
+    refs.InsetX    = insetX
+    refs.InsetY    = insetY
     return refs
 end
 
@@ -699,18 +703,34 @@ function ESP:_createESP(player)
     local cfg = self.config
 
     local highlight = Instance.new("Highlight")
-    highlight.DepthMode          = Enum.HighlightDepthMode.AlwaysOnTop
-    highlight.FillTransparency   = cfg.HL_BASE_TRANSPARENCY
+    highlight.DepthMode           = Enum.HighlightDepthMode.AlwaysOnTop
+    highlight.FillTransparency    = cfg.HL_BASE_TRANSPARENCY
     highlight.OutlineTransparency = cfg.HL_OUTLINE_TRANSPARENCY or 0.4
-    highlight.Enabled            = true
-    highlight.Parent             = CoreGui
+    highlight.Enabled             = true
+    highlight.Parent              = CoreGui
 
     local billboard = Instance.new("BillboardGui")
     billboard.AlwaysOnTop = true
     billboard.StudsOffset = cfg.ESP_STUDS_OFFSET
     billboard.Size        = UDim2.fromOffset(cfg.ESP_NAME_WIDTH, 60)
 
+    -- Tool label (top of stack, above name)
+    local toolLabel = Instance.new("TextLabel")
+    toolLabel.Name                   = "Tool"
+    toolLabel.BackgroundTransparency = 1
+    toolLabel.Size                   = UDim2.new(1, 0, 0, cfg.NT_SIZE_BASE)
+    toolLabel.Position               = UDim2.new(0, 0, 0, 0)
+    toolLabel.Font                   = Enum.Font.GothamMedium
+    toolLabel.TextScaled             = false
+    toolLabel.RichText               = true
+    toolLabel.TextStrokeTransparency = 0
+    toolLabel.TextColor3             = Color3.new(1, 1, 1)
+    toolLabel.Text                   = ""
+    toolLabel.Visible                = cfg.ESP_SHOW_TOOL
+    toolLabel.Parent                 = billboard
+
     local nameLabel = Instance.new("TextLabel")
+    nameLabel.Name                   = "Text"
     nameLabel.BackgroundTransparency = 1
     nameLabel.Size                   = UDim2.new(1, 0, 0, cfg.NT_SIZE_BASE + 6)
     nameLabel.Position               = UDim2.new(0, 0, 0, 0)
@@ -735,12 +755,12 @@ function ESP:_createESP(player)
     subLabel.Visible                = (cfg.ESP_NAME_FORMAT == "Vertical")
     subLabel.Parent                 = billboard
 
-    -- Healthbar (style-specific)
     local hbRefs = self:_buildHealthbar(billboard, cfg, 1)
 
     self._objects[player] = {
         Highlight = highlight,
         Billboard = billboard,
+        ToolLabel = toolLabel,
         NameLabel = nameLabel,
         SubLabel  = subLabel,
         HB        = hbRefs,
@@ -805,28 +825,13 @@ function ESP:_updateFigmaBar(refs, hp, maxHp, scale, hbAlpha, teamColor)
     if not cfg.HB_ENABLED or not refs.Root then return end
 
     local pct = math.clamp(hp / math.max(maxHp, 1), 0, 1)
-    local isVertical = (cfg.HB_POSITION == "Left" or cfg.HB_POSITION == "Right")
 
-    -- Fill size: for the Figma style the fill is a horizontal frame
-    -- inside the local (unrotated) container. Rotation is handled by
-    -- the container itself. So we always shrink the fill's X dimension.
-    refs.Fill.Size        = UDim2.new(pct, 0, 1, 0)
-    refs.Fill.AnchorPoint = Vector2.new(0, 0)
-    refs.Fill.Position    = UDim2.fromOffset(refs.InsetX, refs.InsetY)
-
-    -- Wait — the fill was already sized in build. Need to preserve the
-    -- original track dimensions and just scale X.
-    -- Recompute here cleanly:
-    local trackW = refs.TrackW
-    local trackH = refs.TrackH
-    local fillW = math.floor(trackW * pct + 0.5)
-    refs.Fill.Size     = UDim2.fromOffset(fillW, trackH)
+    local fillW = math.floor(refs.TrackW * pct + 0.5)
+    refs.Fill.Size     = UDim2.fromOffset(fillW, refs.TrackH)
     refs.Fill.Position = UDim2.fromOffset(refs.InsetX, refs.InsetY)
 
-    -- Fill color
     refs.Fill.BackgroundColor3 = resolveHealthColor(pct, teamColor, cfg, "fill")
 
-    -- Dynamic opacity
     if hbAlpha ~= nil then
         refs.Fill.BackgroundTransparency = hbAlpha
         if refs.BG then
@@ -840,24 +845,20 @@ function ESP:_updateFigmaBar(refs, hp, maxHp, scale, hbAlpha, teamColor)
         end
     end
 
-    -- Dividers share the fill's opacity for a coherent look
+    local unitAlpha = refs.Fill.BackgroundTransparency
     if refs.Dividers then
-        for _, d in ipairs(refs.Dividers) do
-            d.BackgroundTransparency = refs.BG and refs.BG.BackgroundTransparency or 0
-        end
+        for _, d in ipairs(refs.Dividers) do d.BackgroundTransparency = unitAlpha end
     end
     if refs.Outlines then
-        for _, o in ipairs(refs.Outlines) do
-            o.BackgroundTransparency = refs.Fill.BackgroundTransparency
-        end
+        for _, o in ipairs(refs.Outlines) do o.BackgroundTransparency = unitAlpha end
     end
     if refs.Corners then
-        for _, c in ipairs(refs.Corners) do
-            c.BackgroundTransparency = refs.Fill.BackgroundTransparency
-        end
+        for _, c in ipairs(refs.Corners) do c.BackgroundTransparency = unitAlpha end
+    end
+    if refs.Midline then
+        refs.Midline.BackgroundTransparency = unitAlpha
     end
 
-    -- Number
     if refs.Number then
         refs.Number.TextTransparency = hbAlpha ~= nil
             and math.clamp(hbAlpha + cfg.HB_NUMBER_EXTRA_TRANSPARENCY, 0, 1)
@@ -881,12 +882,10 @@ end
 --------------------------------------------------------------------------------
 -- LAYOUT (positioning within BillboardGui)
 --------------------------------------------------------------------------------
-function ESP:_layout(obj, bbW, bbH, textW, textH, nameH, subH, hb, lineSpacing, scale)
+function ESP:_layout(obj, bbW, bbH, textW, textH, nameH, subH, hb, lineSpacing, toolH, scale)
     local cfg = self.config
     obj.Billboard.Size = UDim2.fromOffset(bbW, bbH)
 
-    -- textX, textY: nametag's anchor position
-    -- hb: { x, y, w, h, centerX, centerY, rotation }
     local textX, textY
     local hbCenterX, hbCenterY
 
@@ -919,27 +918,38 @@ function ESP:_layout(obj, bbW, bbH, textW, textH, nameH, subH, hb, lineSpacing, 
     textY = textY + (cfg.NT_OFFSET_Y or 0)
 
     local finalNtSize = self._activeNtSize or cfg.NT_SIZE_BASE
+    local toolSize = math.max(6, finalNtSize + (cfg.ESP_TOOL_SIZE_DELTA or 0))
 
+    -- Tool label (top)
+    if cfg.ESP_SHOW_TOOL then
+        obj.ToolLabel.Position = UDim2.fromOffset(textX, textY)
+        obj.ToolLabel.Size     = UDim2.new(0, textW, 0, toolH)
+        obj.ToolLabel.TextSize = toolSize
+        obj.ToolLabel.Visible  = true
+        textY = textY + toolH
+    else
+        obj.ToolLabel.Visible = false
+    end
+
+    -- Name label
     obj.NameLabel.Position = UDim2.fromOffset(textX, textY)
     obj.NameLabel.Size     = UDim2.new(0, textW, 0, nameH)
     obj.NameLabel.TextSize = finalNtSize
 
+    -- Sub label
     obj.SubLabel.Position = UDim2.fromOffset(textX, textY + nameH + (lineSpacing or 0))
     obj.SubLabel.Size     = UDim2.new(0, textW, 0, subH)
     obj.SubLabel.TextSize = finalNtSize
     obj.SubLabel.Visible  = (cfg.ESP_NAME_FORMAT == "Vertical")
 
-    -- Position the healthbar
+    -- Healthbar positioning
     local refs = obj.HB
     if refs.style == "Figma" then
         if refs.Root then
-            refs.Root.Visible = hb.enabled
+            refs.Root.Visible  = hb.enabled
             refs.Root.Position = UDim2.fromOffset(hbCenterX, hbCenterY)
-            -- Rebuild happens only at create; size scales need updating here
-            -- instead. For simplicity, scale is fixed at build time.
         end
     else
-        -- Simple style: position Back, resize
         if refs.Back then
             refs.Back.Visible = hb.enabled
             if hb.enabled then
@@ -959,18 +969,14 @@ function ESP:_layout(obj, bbW, bbH, textW, textH, nameH, subH, hb, lineSpacing, 
                 refs.Back.Size     = UDim2.fromOffset(bw, bh)
 
                 if refs.Number then
-                    -- Number position based on config (Inside/Left/Right/Above/Below)
                     local numW = 80 * scale
                     local numH = (cfg.HB_NUMBER_SIZE * scale) + 4
-                    local npos
                     if cfg.HB_NUMBER_POSITION == "Inside" then
                         refs.Number.Size     = refs.Back.Size
                         refs.Number.Position = refs.Back.Position
                     else
-                        -- Basic offsets (kept from original implementation)
-                        npos = UDim2.fromOffset(bx, by)
                         refs.Number.Size     = UDim2.fromOffset(numW, numH)
-                        refs.Number.Position = npos
+                        refs.Number.Position = UDim2.fromOffset(bx, by)
                     end
                 end
             end
@@ -1026,6 +1032,15 @@ function ESP:update()
                     fillT = cfg.HL_BASE_TRANSPARENCY
                 end
 
+                local outlineT
+                if cfg.HL_OUTLINE_DYNAMIC and cfg.INTEGRATION_ENABLED then
+                    if hit then outlineT = cfg.HL_OUTLINE_LOOK_TRANSPARENCY
+                    elseif sightSeen then outlineT = cfg.HL_OUTLINE_SIGHT_TRANSPARENCY
+                    else outlineT = cfg.HL_OUTLINE_TRANSPARENCY end
+                else
+                    outlineT = cfg.HL_OUTLINE_TRANSPARENCY
+                end
+
                 local ntAlpha, hbAlpha = self:_resolveAlphas(hit, sightSeen, root.Position)
 
                 local ntSize
@@ -1052,30 +1067,17 @@ function ESP:update()
 
                 local scale = self:_computeScreenScale(char, root)
 
-                local bbW, bbH, textW, textH, nameH, subH, hb, lineSpacing =
+                local bbW, bbH, textW, textH, nameH, subH, hb, lineSpacing, toolH =
                     self:_computeLayout(scale)
-                self:_layout(obj, bbW, bbH, textW, textH, nameH, subH, hb, lineSpacing, scale)
-                -- Outline transparency: static or dynamic based on config
-                local outlineT
-                if cfg.HL_OUTLINE_DYNAMIC and cfg.INTEGRATION_ENABLED then
-                    if hit then
-                        outlineT = cfg.HL_OUTLINE_LOOK_TRANSPARENCY
-                    elseif sightSeen then
-                        outlineT = cfg.HL_OUTLINE_SIGHT_TRANSPARENCY
-                    else
-                        outlineT = cfg.HL_OUTLINE_TRANSPARENCY
-                    end
-                else
-                    outlineT = cfg.HL_OUTLINE_TRANSPARENCY
-                end
+                self:_layout(obj, bbW, bbH, textW, textH, nameH, subH, hb, lineSpacing, toolH, scale)
 
                 if self._espVisible and withinRange then
-                    obj.Highlight.Adornee              = char
-                    obj.Highlight.Enabled              = true
-                    obj.Highlight.FillColor            = nameColor
-                    obj.Highlight.OutlineColor         = nameColor
-                    obj.Highlight.FillTransparency     = fillT
-                    obj.Highlight.OutlineTransparency  = outlineT
+                    obj.Highlight.Adornee             = char
+                    obj.Highlight.Enabled             = true
+                    obj.Highlight.FillColor           = nameColor
+                    obj.Highlight.OutlineColor        = nameColor
+                    obj.Highlight.FillTransparency    = fillT
+                    obj.Highlight.OutlineTransparency = outlineT
                 else
                     obj.Highlight.Enabled = false
                     obj.Highlight.Adornee = nil
@@ -1086,10 +1088,48 @@ function ESP:update()
                     obj.Billboard.Parent  = anchorPart
                     obj.Billboard.Enabled = true
 
+                    -- Tool label
+                    if cfg.ESP_SHOW_TOOL then
+                        local toolName = self:_getEquippedToolName(char)
+                        if toolName and toolName ~= "" then
+                            local display
+                            if cfg.ESP_TOOL_FORMAT == "Brackets" then
+                                display = "[" .. toolName .. "]"
+                            else
+                                display = toolName
+                            end
+                            obj.ToolLabel.Text = display
+
+                            local toolColor
+                            if cfg.ESP_TOOL_COLOR_MODE == "Fixed" then
+                                toolColor = cfg.ESP_TOOL_FIXED_COLOR
+                            elseif cfg.ESP_TOOL_COLOR_MODE == "Team" then
+                                toolColor = teamColor or nameColor
+                            else -- "White"
+                                toolColor = Color3.fromRGB(255, 255, 255)
+                            end
+                            obj.ToolLabel.TextColor3 = toolColor
+
+                            local toolFont = cfg.ESP_TOOL_BOLD
+                                and Enum.Font.GothamBold
+                                or Enum.Font.GothamMedium
+                            obj.ToolLabel.Font = toolFont
+
+                            obj.ToolLabel.TextTransparency = ntAlpha
+                            obj.ToolLabel.Visible = true
+                        else
+                            obj.ToolLabel.Visible = false
+                        end
+                    else
+                        obj.ToolLabel.Visible = false
+                    end
+
+                    -- Name
                     obj.NameLabel.Font             = ntFont
                     obj.NameLabel.TextColor3       = nameColor
                     obj.NameLabel.TextTransparency = ntAlpha
 
+                    -- Sub
                     obj.SubLabel.Font             = ntFont
                     obj.SubLabel.TextColor3       = nameColor
                     obj.SubLabel.TextTransparency = ntAlpha
@@ -1173,17 +1213,13 @@ function ESP:stop()
     end
 end
 
-function ESP:destroy()
-    self:stop()
-end
+function ESP:destroy() self:stop() end
 
 function ESP:setConfig(partial)
     if not partial then return end
     for k, v in pairs(partial) do
         if k == "HB_FIGMA" and type(v) == "table" then
-            for kk, vv in pairs(v) do
-                self.config.HB_FIGMA[kk] = vv
-            end
+            for kk, vv in pairs(v) do self.config.HB_FIGMA[kk] = vv end
         else
             self.config[k] = v
         end
@@ -1195,8 +1231,6 @@ function ESP:setConfig(partial)
     end
 end
 
-function ESP:isRunning()
-    return self._running
-end
+function ESP:isRunning() return self._running end
 
 return ESP
