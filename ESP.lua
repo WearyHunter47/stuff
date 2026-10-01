@@ -274,16 +274,7 @@ function ESP:_getEquippedToolName(character)
     if not cfg.ESP_SHOW_TOOL then return nil end
     if not character then return nil end
 
-    -- Prefer the currently equipped tool (parented to character),
-    -- fall back to the humanoid's GetEquippedTool if that's clearer
     local tool = character:FindFirstChildOfClass("Tool")
-    if not tool then
-        local hum = character:FindFirstChildOfClass("Humanoid")
-        if hum and typeof(hum.GetEquippedTool) == "function" then
-            local ok, equipped = pcall(function() return hum:GetEquippedTool() end)
-            if ok and equipped then tool = equipped end
-        end
-    end
     if not tool then return nil end
 
     local name = tool.Name
