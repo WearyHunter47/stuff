@@ -1,11 +1,11 @@
 --[[
     ViewLines + SEI — merged module (Kerenzikov V1.1)
     Player line-of-sight + look-direction visualizer with off-screen
-    edge arrows, and (new) physical vision cones anchored to the head.
+    edge arrows and physical vision cones anchored to the head.
 
     Vision cones:
-      • 2D: flat Prism on the ground, apex at head X/Z, foot Y
-      • 3D: Pyramid volume from the head
+      • 2D: mirrored WedgeParts forming a triangle on the ground
+      • 3D: Pyramid with apex at the head
       • Optional per-cone Highlight
       • Team colors, inverse hit color, in-house fallback
       • Priority selection by distance (max 8 by default)
@@ -98,11 +98,11 @@ local DEFAULTS = {
     VISION_CONE_MODE           = "2D",        -- "2D" | "3D" | "Both"
     VISION_CONE_MAX_PLAYERS    = 8,
     VISION_CONE_RANGE          = 20,
-    VISION_CONE_ACTIVATION_RANGE = 150,       -- only render if within this
+    VISION_CONE_ACTIVATION_RANGE = 150,
 
-    VISION_CONE_COLOR_MODE     = "Team",      -- "Team" | "Fixed" | "Healthbar"
+    VISION_CONE_COLOR_MODE     = "Team",
     VISION_CONE_FIXED_COLOR    = Color3.fromRGB(255, 200, 80),
-    VISION_CONE_USE_FIXED_HIT  = false,       -- false = inverse of base color
+    VISION_CONE_USE_FIXED_HIT  = false,
     VISION_CONE_FIXED_HIT_COLOR = Color3.fromRGB(255, 60, 60),
 
     VISION_CONE_ALPHA_2D       = 0.7,
@@ -111,18 +111,16 @@ local DEFAULTS = {
     VISION_CONE_HIT_ALPHA_3D   = 0.65,
 
     VISION_CONE_HIGHLIGHT      = true,
-    VISION_CONE_HIGHLIGHT_DEPTH = "Occluded", -- "Occluded" | "AlwaysOnTop"
+    VISION_CONE_HIGHLIGHT_DEPTH = "Occluded",
     VISION_CONE_GROUND_OFFSET  = 0.15,
 
     VISION_CONE_CONFORM_TERRAIN = false,
-    VISION_CONE_CONFORM_RAYS    = 2,          -- 2 = pitch only, 4 = +roll
+    VISION_CONE_CONFORM_RAYS    = 2,
 
-    VISION_CONE_TILT_FADE      = true,        -- fade when head tilts off-horizontal
-    VISION_CONE_OCCLUDE_ENABLED = true,       -- fade 3D cone when looking at it
+    VISION_CONE_TILT_FADE      = true,
+    VISION_CONE_OCCLUDE_ENABLED = true,
     VISION_CONE_OCCLUDE_THRESHOLD = 0.85,
     VISION_CONE_OCCLUDE_MIN_ALPHA = 0.9,
-
-    VISION_CONE_DOT_ENABLED    = false,       -- small dot at cone tip
 }
 
 --------------------------------------------------------------------------------
@@ -167,7 +165,6 @@ local function eyeOf(head)
     return head.Position + look * (head.Size.Z * 0.5), look
 end
 
--- Beam occlusion helper (same as before)
 local function applyBeamOcclusion(cfg, worldA, worldB, baseAlpha)
     if not cfg.BEAM_OCCLUDE_ENABLED then return baseAlpha end
     local cam = workspace.CurrentCamera
@@ -506,12 +503,15 @@ function ViewLines:_publishClearAll()
     bus.ViewLines.Visibility = {}
 end
 
--- ─── Vision cone builders ─────────────────────────────────────────────
+--------------------------------------------------------------------------------
+-- VISION CONES
+--------------------------------------------------------------------------------
 function ViewLines:_destroyVisionCone(player)
     local vc = self._visionCones[player]
     if not vc then return end
     for _, obj in ipairs({
-        vc.model, vc.highlight, vc.part2D, vc.mesh2D,
+        vc.model, vc.highlight,
+        vc.wedge2DLeft, vc.wedge2DRight,
         vc.part3D, vc.mesh3D,
     }) do
         if obj then pcall(function() obj:Destroy() end) end
@@ -529,30 +529,28 @@ function ViewLines:_createVisionCone(player)
     model.Parent = workspace
     vc.model = model
 
-    -- 2D: flat Prism on the ground
+    -- ─── 2D: mirrored WedgeParts forming a triangle on the ground ──────
     if cfg.VISION_CONE_MODE == "2D" or cfg.VISION_CONE_MODE == "Both" then
-        local part = Instance.new("Part")
-        part.Name = "Cone2D"
-        part.Anchored = true
-        part.CanCollide = false
-        part.CanQuery = false
-        part.CanTouch = false
-        part.CastShadow = false
-        part.Material = Enum.Material.Neon
-        part.Transparency = cfg.VISION_CONE_ALPHA_2D
-        part.Size = Vector3.new(1, 0.1, 1)   -- resized per frame
-        part.Color = Color3.fromRGB(255, 200, 80)
+        local function makeWedge(name)
+            local p = Instance.new("WedgePart")
+            p.Name = name
+            p.Anchored = true
+            p.CanCollide = false
+            p.CanQuery = false
+            p.CanTouch = false
+            p.CastShadow = false
+            p.Material = Enum.Material.Neon
+            p.Transparency = cfg.VISION_CONE_ALPHA_2D
+            p.Color = Color3.fromRGB(255, 200, 80)
+            p.Parent = model
+            return p
+        end
 
-        local mesh = Instance.new("SpecialMesh")
-        mesh.MeshType = Enum.MeshType.Prism
-        mesh.Parent = part
-
-        part.Parent = model
-        vc.part2D = part
-        vc.mesh2D = mesh
+        vc.wedge2DLeft  = makeWedge("Cone2D_Left")
+        vc.wedge2DRight = makeWedge("Cone2D_Right")
     end
 
-    -- 3D: Pyramid volume from the head
+    -- ─── 3D: Pyramid from head ─────────────────────────────────────────
     if cfg.VISION_CONE_MODE == "3D" or cfg.VISION_CONE_MODE == "Both" then
         local part = Instance.new("Part")
         part.Name = "Cone3D"
@@ -599,7 +597,7 @@ function ViewLines:_resolveConeColor(player, hit)
 
     if cfg.VISION_CONE_COLOR_MODE == "Fixed" then
         base = cfg.VISION_CONE_FIXED_COLOR
-    else -- "Team" (fallback to fixed if no team)
+    else
         base = getTeamColorOf(player) or cfg.VISION_CONE_FIXED_COLOR
     end
 
@@ -610,7 +608,6 @@ function ViewLines:_resolveConeColor(player, hit)
             return inverseColor(base)
         end
     end
-
     return base
 end
 
@@ -650,109 +647,105 @@ function ViewLines:_updateVisionCone(player, entry, hit)
     if flat.Magnitude < 1e-4 then flat = Vector3.new(0, 0, -1) end
     flat = flat.Unit
 
-    -- Vertical anchor at foot Y
+    -- Foot Y for the 2D cone
     local root = char:FindFirstChild("HumanoidRootPart")
     local footY = head.Position.Y - 3
-    if root then
-        footY = root.Position.Y - root.Size.Y * 0.5
-    end
+    if root then footY = root.Position.Y - root.Size.Y * 0.5 end
 
-    -- Apex position (head X/Z, foot Y)
+    -- Apex position: head X/Z, foot Y
     local apexPos = Vector3.new(
         head.Position.X,
         footY + cfg.VISION_CONE_GROUND_OFFSET,
         head.Position.Z
     )
 
-    -- Cone CFrame
-    local coneCFrame = CFrame.lookAt(apexPos, apexPos + flat)
-    local apexY = apexPos.Y
+    -- Base geometry
+    local halfFov = math.rad((cfg.FOV_DEGREES or 120) * 0.5)
+    local baseWidth = 2 * cfg.VISION_CONE_RANGE * math.tan(halfFov)
 
-    -- Terrain conform: raycast at apex + base center for pitch
-    if cfg.VISION_CONE_CONFORM_TERRAIN then
-        local rp = self:_rayParams(char)
-        local baseCenter = apexPos + flat * cfg.VISION_CONE_RANGE
-
-        local apexHit = workspace:Raycast(
-            Vector3.new(apexPos.X, apexPos.Y + 6, apexPos.Z),
-            Vector3.new(0, -20, 0),
-            rp
-        )
-        local baseHit = workspace:Raycast(
-            Vector3.new(baseCenter.X, baseCenter.Y + 6, baseCenter.Z),
-            Vector3.new(0, -20, 0),
-            rp
-        )
-
-        local useApexY = apexHit and (apexHit.Position.Y + cfg.VISION_CONE_GROUND_OFFSET) or apexPos.Y
-        apexY = useApexY
-
-        local baseY = baseHit and (baseHit.Position.Y + cfg.VISION_CONE_GROUND_OFFSET)
-            or (useApexY)
-        local dy = baseY - useApexY
-        local dx = math.max(cfg.VISION_CONE_RANGE, 1e-3)
-        local pitch = math.atan2(dy, dx)
-
-        apexPos = Vector3.new(apexPos.X, useApexY, apexPos.Z)
-        local baseCF = CFrame.lookAt(apexPos, apexPos + flat)
-        coneCFrame = baseCF * CFrame.Angles(-pitch, 0, 0)
-    end
-
-    -- Tilt fade: reduce alpha proportionally to head pitch away from horizontal
+    -- Tilt fade
     local tiltAlpha = 1
     if cfg.VISION_CONE_TILT_FADE then
         tiltAlpha = clamp(1 - math.abs(look.Y), 0, 1)
     end
 
-    -- FOV geometry
-    local halfFov = math.rad((cfg.FOV_DEGREES or 120) * 0.5)
-    local baseWidth = 2 * cfg.VISION_CONE_RANGE * math.tan(halfFov)
-
-    -- Base color from team / fixed / healthbar
     local baseColor = self:_resolveConeColor(player, hit)
 
-    -- ─── 2D cone ──────────────────────────────────────────────────────
-    if vc.part2D then
-        local width2D = cfg.VISION_CONE_RANGE
-        local depth2D = baseWidth
+    -- ─── 2D cone: two mirrored WedgeParts ──────────────────────────────
+    if vc.wedge2DLeft and vc.wedge2DRight then
+        -- WedgePart: right-angle triangle. We use two mirrored wedges so
+        -- their hypotenuses meet to form the outer cone edges, and their
+        -- shared right-angle corners form the apex at the head position.
+        --
+        -- Orient: local X points along `flat` (radial from apex outward),
+        -- local Y points perpendicular to `flat` on the ground (fan out),
+        -- local Z points up (thin axis).
 
-        vc.part2D.Size = Vector3.new(width2D, 0.1, depth2D)
-        -- Prism apex at origin: shift so the apex sits at the head position
-        vc.part2D.CFrame = coneCFrame
-            * CFrame.new(width2D * 0.5, 0, 0)
+        local wedgeLength = cfg.VISION_CONE_RANGE      -- X extent (radial)
+        local wedgeWidth  = baseWidth * 0.5            -- Y extent (half of fan)
+        local thickness   = 0.1
+
+        -- Ground-plane perpendicular to flat
+        local right = Vector3.new(-flat.Z, 0, flat.X)
+
+        -- Base orientation: +X along flat, +Y along right, +Z up
+        local baseCF = CFrame.fromMatrix(
+            apexPos,
+            flat,
+            right,
+            Vector3.new(0, 1, 0)
+        )
+
+        -- Right wedge: sits in the +Y half, extends +X and +Y from apex.
+        -- Wedge's right-angle vertex is at the origin of the part. We want
+        -- it at the apex, so offset the part center to (length/2, width/2).
+        local rightCF = baseCF
+            * CFrame.new(wedgeLength * 0.5, wedgeWidth * 0.5, 0)
+        vc.wedge2DRight.Size = Vector3.new(wedgeLength, wedgeWidth, thickness)
+        vc.wedge2DRight.CFrame = rightCF
+
+        -- Left wedge: mirrored across the X axis (Y negated). Achieved by
+        -- rotating 180° around the X axis and offsetting center to
+        -- (length/2, -width/2). But since WedgePart's triangle is fixed
+        -- in its local frame, we mirror via CFrame.
+        local leftCF = baseCF
+            * CFrame.new(wedgeLength * 0.5, -wedgeWidth * 0.5, 0)
+            * CFrame.Angles(0, 0, math.rad(180))
+        vc.wedge2DLeft.Size = Vector3.new(wedgeLength, wedgeWidth, thickness)
+        vc.wedge2DLeft.CFrame = leftCF
 
         local alpha2D = (hit and cfg.VISION_CONE_HIT_ALPHA_2D or cfg.VISION_CONE_ALPHA_2D)
-        if cfg.VISION_CONE_OCCLUDE_ENABLED then
-            alpha2D = self:_coneOcclusionAlpha(alpha2D, vc.part2D.Position)
-        end
-        -- Apply tilt fade (adds transparency as head tilts)
         alpha2D = clamp(alpha2D + (1 - tiltAlpha), 0, 1)
-
-        vc.part2D.Transparency = alpha2D
-        vc.part2D.Color = baseColor
+        vc.wedge2DLeft.Transparency  = alpha2D
+        vc.wedge2DRight.Transparency = alpha2D
+        vc.wedge2DLeft.Color  = baseColor
+        vc.wedge2DRight.Color = baseColor
     end
 
-    -- ─── 3D cone ──────────────────────────────────────────────────────
+    -- ─── 3D cone: Pyramid with apex at head ────────────────────────────
     if vc.part3D then
-        -- Pyramid apex at head, base at range
-        -- Pyramid mesh native apex is at +Y, base at -Y typically; we point it forward
-        local length3D = cfg.VISION_CONE_RANGE
-        local width3D = baseWidth
-        local height3D = baseWidth
+        -- Pyramid's apex is at +Y (mesh local). We want apex at head.
+        -- So pyramid's local +Y must point from base-center toward the head,
+        -- which is -flat. Local X and Z are the pyramid's width/depth axes.
+        local yAxis = -flat
+        local xAxis = yAxis:Cross(Vector3.new(0, 1, 0))
+        if xAxis.Magnitude < 0.1 then
+            xAxis = yAxis:Cross(Vector3.new(1, 0, 0))
+        end
+        xAxis = xAxis.Unit
+        local zAxis = xAxis:Cross(yAxis).Unit
 
-        vc.part3D.Size = Vector3.new(width3D, length3D, height3D)
-        -- Orientation: the Pyramid mesh's axis is along Y, so we need to
-        -- rotate it to point along the cone direction (flat)
-        vc.part3D.CFrame = coneCFrame
-            * CFrame.Angles(math.rad(90), 0, 0)
-            * CFrame.new(0, -length3D * 0.5, 0)
+        local pyramidLength = cfg.VISION_CONE_RANGE
+        local pyramidCenter = head.Position + flat * (pyramidLength * 0.5)
+
+        vc.part3D.Size = Vector3.new(baseWidth, pyramidLength, baseWidth)
+        vc.part3D.CFrame = CFrame.fromMatrix(pyramidCenter, xAxis, yAxis, zAxis)
 
         local alpha3D = (hit and cfg.VISION_CONE_HIT_ALPHA_3D or cfg.VISION_CONE_ALPHA_3D)
         if cfg.VISION_CONE_OCCLUDE_ENABLED then
             alpha3D = self:_coneOcclusionAlpha(alpha3D, vc.part3D.Position)
         end
         alpha3D = clamp(alpha3D + (1 - tiltAlpha), 0, 1)
-
         vc.part3D.Transparency = alpha3D
         vc.part3D.Color = baseColor
     end
@@ -766,22 +759,21 @@ function ViewLines:_updateVisionCone(player, entry, hit)
     end
 end
 
--- ─── Cleanup ──────────────────────────────────────────────────────────
+--------------------------------------------------------------------------------
+-- CLEANUP
+--------------------------------------------------------------------------------
 function ViewLines:_cleanup(player)
     local e = self._entries[player]
-    if not e then
-        self:_destroyVisionCone(player)
-        return
+    if e then
+        for _, obj in ipairs({
+            e.sightBeam, e.sightAttViewer, e.sightAttMine,
+            e.lookBeam, e.lookAttFace, e.lookAttTip,
+            e.dotPart,
+        }) do
+            if obj then pcall(function() obj:Destroy() end) end
+        end
+        self._entries[player] = nil
     end
-
-    for _, obj in ipairs({
-        e.sightBeam, e.sightAttViewer, e.sightAttMine,
-        e.lookBeam, e.lookAttFace, e.lookAttTip,
-        e.dotPart,
-    }) do
-        if obj then pcall(function() obj:Destroy() end) end
-    end
-    self._entries[player] = nil
 
     self:_destroyVisionCone(player)
     pcall(function() self:_publishClear(player) end)
@@ -793,7 +785,6 @@ function ViewLines:_cleanupAll()
     for p in pairs(self._entries) do list[#list + 1] = p end
     for _, p in ipairs(list) do self:_cleanup(p) end
 
-    -- Also clear any orphaned cones
     local coneList = {}
     for p in pairs(self._visionCones) do coneList[#coneList + 1] = p end
     for _, p in ipairs(coneList) do self:_destroyVisionCone(p) end
@@ -802,6 +793,9 @@ function ViewLines:_cleanupAll()
     pcall(function() self:_publishClearAll() end)
 end
 
+--------------------------------------------------------------------------------
+-- ENTRY BUILDING
+--------------------------------------------------------------------------------
 function ViewLines:_ensureEntry(player, myRoot)
     local char = player.Character
     if not char then return nil end
@@ -882,6 +876,9 @@ function ViewLines:_ensureEntry(player, myRoot)
     return entry
 end
 
+--------------------------------------------------------------------------------
+-- VISIBILITY
+--------------------------------------------------------------------------------
 function ViewLines:_evaluateVisibility(viewerChar, viewerHead, myChar, mySamples)
     if #mySamples == 0 then return 0 end
     local eye, look = eyeOf(viewerHead)
@@ -944,6 +941,9 @@ function ViewLines:_updateLookGeometry(entry, viewerHead, viewerChar)
     return endWorld, length
 end
 
+--------------------------------------------------------------------------------
+-- APPEARANCE
+--------------------------------------------------------------------------------
 function ViewLines:_applySightAppearance(beam, vis)
     local cfg = self.config
     local color, width, transparency
@@ -998,6 +998,9 @@ function ViewLines:_applyLookAppearance(entry, hit, length)
     end
 end
 
+--------------------------------------------------------------------------------
+-- EDGE INDICATOR
+--------------------------------------------------------------------------------
 function ViewLines:_updateEdgeIndicator(player, theirChar, hit, vis)
     local cfg = self.config
     if not cfg.EDGE_INDICATORS then
@@ -1045,7 +1048,9 @@ function ViewLines:_updateEdgeIndicator(player, theirChar, hit, vis)
     end
 end
 
--- ─── Vision cone priority selection ───────────────────────────────────
+--------------------------------------------------------------------------------
+-- CONE PRIORITY
+--------------------------------------------------------------------------------
 function ViewLines:_selectConePlayers(candidates, myRoot)
     local cfg = self.config
     if not cfg.VISION_CONE_ENABLED then return {} end
@@ -1074,7 +1079,9 @@ function ViewLines:_selectConePlayers(candidates, myRoot)
     return picked
 end
 
--- ─── Main update ──────────────────────────────────────────────────────
+--------------------------------------------------------------------------------
+-- MAIN UPDATE
+--------------------------------------------------------------------------------
 function ViewLines:update()
     local cfg = self.config
     local myChar = LocalPlayer.Character
@@ -1087,7 +1094,6 @@ function ViewLines:update()
 
     local mySamples = self:_getSamplePoints(myChar)
 
-    -- Stale sweep
     local stale = {}
     for player, e in pairs(self._entries) do
         if not player.Parent or not player.Character
@@ -1102,7 +1108,6 @@ function ViewLines:update()
         self:_cleanup(player)
     end
 
-    -- First pass: build entries, compute hits, gather cone candidates
     local coneCandidates = {}
 
     for _, player in ipairs(Players:GetPlayers()) do
@@ -1143,7 +1148,6 @@ function ViewLines:update()
 
                             self:_updateEdgeIndicator(player, theirChar, hit, vis)
 
-                            -- Candidate for a vision cone
                             if cfg.VISION_CONE_ENABLED then
                                 coneCandidates[#coneCandidates + 1] = {
                                     player = player,
@@ -1157,11 +1161,9 @@ function ViewLines:update()
         end
     end
 
-    -- Second pass: vision cones for the top N closest candidates
     if cfg.VISION_CONE_ENABLED then
         local picked = self:_selectConePlayers(coneCandidates, myRoot)
 
-        -- Update picked cones
         for _, c in ipairs(coneCandidates) do
             if picked[c.player] then
                 local e = self._entries[c.player]
@@ -1173,14 +1175,12 @@ function ViewLines:update()
             end
         end
 
-        -- Clean up cones for players no longer in the entries table
         for player in pairs(self._visionCones) do
             if not self._entries[player] then
                 self:_destroyVisionCone(player)
             end
         end
     else
-        -- Vision cones disabled: clean up any existing ones
         for player in pairs(self._visionCones) do
             self:_destroyVisionCone(player)
         end
@@ -1189,7 +1189,9 @@ function ViewLines:update()
     pcall(function() self._edgeIndicators:update() end)
 end
 
--- ─── Lifecycle ────────────────────────────────────────────────────────
+--------------------------------------------------------------------------------
+-- LIFECYCLE
+--------------------------------------------------------------------------------
 function ViewLines:start()
     if self._running then return end
     self._running = true
