@@ -1,13 +1,13 @@
---[[ //Kerenzikov V1.1\\
+--[[ //Kerenzikov V1.2\\
    Configs below.
 ]]
 
 --------------------------------------------------------------------------------
 -- MODULE SOURCES
 --------------------------------------------------------------------------------
-local VL_URL  = "https://raw.githubusercontent.com/WearyHunter47/stuff/refs/heads/main/LoSD.lua"
-local ESP_URL = "https://raw.githubusercontent.com/WearyHunter47/stuff/refs/heads/main/ESP.lua"
-local HB_URL  = "https://raw.githubusercontent.com/WearyHunter47/stuff/refs/heads/main/Healthbar.lua"
+local VL_URL  = "https://raw.githubusercontent.com/WearyHunter47/stuff/refs/heads/main/Kerenzikov/LoSD.lua"
+local ESP_URL = "https://raw.githubusercontent.com/WearyHunter47/stuff/refs/heads/main/Kerenzikov/ESP.lua"
+local HB_URL  = "https://raw.githubusercontent.com/WearyHunter47/stuff/refs/heads/main/Kerenzikov/Healthbar.lua"
 
 --------------------------------------------------------------------------------
 -- SHARED NAME FORMATTING (both modules read these values)
