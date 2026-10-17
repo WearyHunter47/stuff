@@ -36,7 +36,10 @@ local DEFAULTS = {
         "LeftUpperArm", "RightUpperArm",
         "Left Arm",     "Right Arm",
     },
-
+    SHOW_SIGHT_BEAM = true,
+    SHOW_LOOK_BEAM  = true,
+    SHOW_LOOK_DOT   = true,
+    
     VISIBLE_COLOR          = Color3.fromRGB(255, 45, 45),
     BLOCKED_COLOR          = Color3.fromRGB(80, 80, 80),
     VISIBLE_WIDTH          = 0.15,
@@ -919,6 +922,7 @@ function ViewLines:_ensureEntry(player, myRoot)
     lookBeam.Width1 = cfg.LOOK_WIDTH
     lookBeam.Color = ColorSequence.new(cfg.LOOK_COLOR)
     lookBeam.Transparency = NumberSequence.new(cfg.LOOK_TRANSPARENCY_NEAR)
+    lookBeam.Enabled = cfg.SHOW_LOOK_BEAM
     lookBeam.Parent = workspace
 
     local dotPart
@@ -934,6 +938,7 @@ function ViewLines:_ensureEntry(player, myRoot)
         dotPart.Material = Enum.Material.Neon
         dotPart.Color = cfg.LOOK_COLOR
         dotPart.Transparency = cfg.LOOK_DOT_ALPHA
+        dotPart.Visible = cfg.SHOW_LOOK_DOT
         dotPart.Parent = workspace
     end
 
@@ -1213,7 +1218,7 @@ function ViewLines:update()
                             if cfg.HIDE_SIGHT_WHEN_AIMED and hit then
                                 e.sightBeam.Enabled = false
                             else
-                                e.sightBeam.Enabled = true
+                                e.sightBeam.Enabled = cfg.SHOW_SIGHT_BEAM
                                 self:_applySightAppearance(e.sightBeam, vis)
                             end
 
