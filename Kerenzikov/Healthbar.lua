@@ -1361,7 +1361,22 @@ function SelfHealthbar:update()
     local now = os.clock()
     local hum = self._humanoid
     local cfg = self.config
-
+    
+-- 🛠️ PATCHED: Re-hook character if missing or dead
+    if not hum or not hum.Parent or hum.Health <= 0 then
+        local myChar = LocalPlayer.Character
+        -- If we have a new character, hook it immediately
+        if myChar and myChar ~= self._character then
+            self:_hookCharacter(myChar)
+        else
+            self._hud.GroupTransparency = 1
+            if self._viewListContainer then
+                self._viewListContainer.GroupTransparency = 1
+            end
+            return
+        end
+    end
+    
     if not hum or hum.Health <= 0 then
         self._hud.GroupTransparency = 1
         if self._viewListContainer then
