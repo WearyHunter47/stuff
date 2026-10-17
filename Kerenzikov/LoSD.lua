@@ -937,8 +937,7 @@ function ViewLines:_ensureEntry(player, myRoot)
         dotPart.CastShadow = false
         dotPart.Material = Enum.Material.Neon
         dotPart.Color = cfg.LOOK_COLOR
-        dotPart.Transparency = cfg.LOOK_DOT_ALPHA
-        dotPart.Visible = cfg.SHOW_LOOK_DOT
+        dotPart.Transparency = cfg.SHOW_LOOK_DOT and cfg.LOOK_DOT_ALPHA or 1
         dotPart.Parent = workspace
     end
 
