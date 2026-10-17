@@ -2,12 +2,6 @@
     Kerenzikov — AimTools Module
     Handles Noclip Cam, penetrating Aim Raycasts, and X-Ray fading.
     Publishes valid targets to getgenv().ModuleBus.ViewLines.ValidTarget
-
-    Features:
-      • Noclip Cam: Fades parts intersecting the camera.
-      • Aim Raycast: Casts up to 1000 studs, penetrating through walls.
-      • X-Ray: Fades walls blocking the target.
-      • Valid Target: Marks players if they are in direct line of sight.
 ]]
 
 local Players          = game:GetService("Players")
@@ -15,7 +9,6 @@ local RunService       = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 
 local LocalPlayer = Players.LocalPlayer
-local Camera      = workspace.CurrentCamera
 
 --------------------------------------------------------------------------------
 -- DEFAULTS
@@ -29,14 +22,15 @@ local DEFAULTS = {
     -- Aim Raycast / Valid Target
     AIM_RAYCAST_ENABLED   = true,
     AIM_RANGE             = 1000,
-    AIM_MAX_PENETRATIONS  = 15,     -- Max parts to pass through
-    IGNORE_NO_COLLISION   = false,  -- If true, CanCollide=false parts are ignored
+    AIM_MAX_PENETRATIONS  = 15,     
+    IGNORE_NO_COLLISION   = false,  
+    MARK_THROUGH_WALLS    = false,  -- If true, marks targets even behind walls
 
     -- X-Ray
     XRAY_ENABLED          = true,
-    XRAY_TARGET_TRANSPARENCY = 0.5, -- The wall closest to the target
-    XRAY_PREV_TRANSPARENCY   = 0.95,-- Walls before the closest one
-    XRAY_FORCEFIELD          = false, -- If true, applies ForceField material to ghosted walls
+    XRAY_TARGET_TRANSPARENCY = 0.5, 
+    XRAY_PREV_TRANSPARENCY   = 0.95,
+    XRAY_FORCEFIELD          = false, 
 
     UPDATE_INTERVAL       = 0,
 }
@@ -55,7 +49,7 @@ function AimTools.new(overrides)
         for k, v in pairs(overrides) do self.config[k] = v end
     end
 
-    self._modifiedParts = {} -- [BasePart] = original properties
+    self._modifiedParts = {} 
     self._connections = {}
     self._running = false
     self._lastUpdate = 0
@@ -99,13 +93,12 @@ function AimTools:_fadePart(part, transparency, applyForceField)
     end
 end
 
-function AimTools:_updateNoclip()
+function AimTools:_updateNoclip(Camera)
     if not self.config.NOCLIP_ENABLED or not Camera then return end
 
     local overlapParams = OverlapParams.new()
     overlapParams.FilterType = Enum.RaycastFilterType.Exclude
     
-    -- Safe filter check to prevent nil errors
     local filter = {}
     if LocalPlayer.Character then
         table.insert(filter, LocalPlayer.Character)
@@ -123,7 +116,7 @@ function AimTools:_updateNoclip()
     end
 end
 
-function AimTools:_updateAim()
+function AimTools:_updateAim(Camera)
     local cfg = self.config
     local bus = getgenv().ModuleBus
     
@@ -140,13 +133,14 @@ function AimTools:_updateAim()
     local params = RaycastParams.new()
     params.FilterType = Enum.RaycastFilterType.Exclude
     
-    -- Safe filter check
     local filter = {}
     if LocalPlayer.Character then
         table.insert(filter, LocalPlayer.Character)
     end
     params.FilterDescendantsInstances = filter
-    params.RespectCanCollide = not cfg.IGNORE_NO_COLLISION
+    
+    -- 🛠️ FIX: RespectCanCollide MUST be false to hit player limbs (which are CanCollide=false)
+    params.RespectCanCollide = false 
 
     local obstructions = {}
     local targetPlayer = nil
@@ -163,7 +157,7 @@ function AimTools:_updateAim()
         totalDist = totalDist + hit.Distance
         local hitPart = hit.Instance
         
-        -- Robust player detection (traverses up to find the character model, ignoring hats/accessories)
+        -- Robust player detection
         local hitPlayer = nil
         local current = hitPart
         while current and current ~= workspace do
@@ -193,7 +187,8 @@ function AimTools:_updateAim()
     table.clear(bus.ViewLines.ValidTarget)
 
     if targetPlayer then
-        local isValid = (#obstructions == 0)
+        -- If MARK_THROUGH_WALLS is true, we ignore obstructions for the tag
+        local isValid = self.config.MARK_THROUGH_WALLS or (#obstructions == 0)
         bus.ViewLines.ValidTarget[targetPlayer] = isValid
 
         -- Apply X-Ray
@@ -210,9 +205,19 @@ function AimTools:_updateAim()
 end
 
 function AimTools:update()
+    -- 🛠️ FIX: Update Camera reference dynamically
+    local Camera = workspace.CurrentCamera
+    if not Camera then return end
+
     self:_resetParts()
-    self:_updateNoclip()
-    self:_updateAim()
+    
+    -- 🛠️ FIX: Wrap in pcall so an error in Aim doesn't break the RenderStepped loop
+    local ok1 = pcall(function() self:_updateNoclip(Camera) end)
+    local ok2 = pcall(function() self:_updateAim(Camera) end)
+    
+    -- If you want to see errors, uncomment the lines below:
+    -- if not ok1 then warn("Noclip Error") end
+    -- if not ok2 then warn("Aim Error") end
 end
 
 --------------------------------------------------------------------------------
