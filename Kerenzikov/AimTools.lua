@@ -8,8 +8,6 @@
       • Aim Raycast: Casts up to 1000 studs, penetrating through walls.
       • X-Ray: Fades walls blocking the target.
       • Valid Target: Marks players if they are in direct line of sight.
-
-    No side effects on require. No auto-start, no print, no global.
 ]]
 
 local Players          = game:GetService("Players")
@@ -57,7 +55,7 @@ function AimTools.new(overrides)
         for k, v in pairs(overrides) do self.config[k] = v end
     end
 
-    self._modifiedParts = {} -- [BasePart] = original material
+    self._modifiedParts = {} -- [BasePart] = original properties
     self._connections = {}
     self._running = false
     self._lastUpdate = 0
@@ -71,11 +69,12 @@ function AimTools:_track(conn)
 end
 
 function AimTools:_resetParts()
-    for part, originalMat in pairs(self._modifiedParts) do
+    for part, data in pairs(self._modifiedParts) do
         if part and part.Parent then
-            part.LocalTransparencyModifier = 0
+            -- Restore original transparency modifier
+            part.LocalTransparencyModifier = data.Transparency
             if self.config.XRAY_FORCEFIELD then
-                pcall(function() part.Material = originalMat end)
+                pcall(function() part.Material = data.Material end)
             end
         end
     end
@@ -85,9 +84,12 @@ end
 function AimTools:_fadePart(part, transparency, applyForceField)
     if not part or not part.Parent then return end
     
-    -- Save original material if we're applying ForceField
-    if applyForceField and not self._modifiedParts[part] then
-        self._modifiedParts[part] = part.Material
+    -- Save original state so we can restore it later
+    if not self._modifiedParts[part] then
+        self._modifiedParts[part] = {
+            Material = part.Material,
+            Transparency = part.LocalTransparencyModifier
+        }
     end
 
     -- LocalTransparencyModifier is client-side only and won't replicate
@@ -102,7 +104,13 @@ function AimTools:_updateNoclip()
 
     local overlapParams = OverlapParams.new()
     overlapParams.FilterType = Enum.RaycastFilterType.Exclude
-    overlapParams.FilterDescendantsInstances = { LocalPlayer.Character, Camera }
+    
+    -- Safe filter check to prevent nil errors
+    local filter = {}
+    if LocalPlayer.Character then
+        table.insert(filter, LocalPlayer.Character)
+    end
+    overlapParams.FilterDescendantsInstances = filter
 
     local parts = workspace:GetPartBoundsInRadius(
         Camera.CFrame.Position, 
@@ -123,7 +131,7 @@ function AimTools:_updateAim()
     bus.ViewLines.ValidTarget = bus.ViewLines.ValidTarget or {}
     
     if not cfg.AIM_RAYCAST_ENABLED or not Camera then
-        bus.ViewLines.ValidTarget = {}
+        table.clear(bus.ViewLines.ValidTarget)
         return
     end
 
@@ -131,7 +139,13 @@ function AimTools:_updateAim()
     local rayDir = Camera.CFrame.LookVector
     local params = RaycastParams.new()
     params.FilterType = Enum.RaycastFilterType.Exclude
-    params.FilterDescendantsInstances = { LocalPlayer.Character, Camera }
+    
+    -- Safe filter check
+    local filter = {}
+    if LocalPlayer.Character then
+        table.insert(filter, LocalPlayer.Character)
+    end
+    params.FilterDescendantsInstances = filter
     params.RespectCanCollide = not cfg.IGNORE_NO_COLLISION
 
     local obstructions = {}
@@ -148,8 +162,20 @@ function AimTools:_updateAim()
 
         totalDist = totalDist + hit.Distance
         local hitPart = hit.Instance
-        local hitChar = hitPart:FindFirstAncestorOfClass("Model")
-        local hitPlayer = hitChar and Players:GetPlayerFromCharacter(hitChar)
+        
+        -- Robust player detection (traverses up to find the character model, ignoring hats/accessories)
+        local hitPlayer = nil
+        local current = hitPart
+        while current and current ~= workspace do
+            if current:IsA("Model") then
+                local p = Players:GetPlayerFromCharacter(current)
+                if p then
+                    hitPlayer = p
+                    break
+                end
+            end
+            current = current.Parent
+        end
 
         if hitPlayer and hitPlayer ~= LocalPlayer then
             targetPlayer = hitPlayer
@@ -163,8 +189,8 @@ function AimTools:_updateAim()
         rayOrigin = hit.Position + rayDir * 0.1
     end
 
-    -- Reset ValidTarget states for everyone else
-    bus.ViewLines.ValidTarget = {}
+    -- Clear ValidTarget states without replacing the table reference
+    table.clear(bus.ViewLines.ValidTarget)
 
     if targetPlayer then
         local isValid = (#obstructions == 0)
