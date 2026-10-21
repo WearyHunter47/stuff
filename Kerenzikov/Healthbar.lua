@@ -3,22 +3,6 @@
     Cursor-anchored HP HUD with damage popups, DPS/HPS tracking, dynamic
     opacity, size pulse, progression modes, circular mode, and a live
     "view list" showing who can see or is aiming at you.
-
-    View list priorities:
-      • Threat tier (look > sight > idle)
-      • Off-screen viewers rank above on-screen ones (same tier)
-      • Distance (closer = higher)
-      • Name (alphabetical tiebreaker)
-
-    V1.1 features:
-      • Left-aligned view list rows with optional native "..." truncation
-      • Circular ring spins with the shake (proportional to HP fraction),
-        then eases back
-      • Size pulse driven by UIScale via NumberValue tween
-      • Low-HP progressive scale-up (linear, capped by LOWHP_SCALE_MAX)
-      • Optional text-size exclusion from low-HP scaling
-
-    No side effects on require. No auto-start, no print, no global.
 ]]
 
 local Players          = game:GetService("Players")
@@ -102,8 +86,6 @@ local DEFAULTS = {
     SHAKE_ON_DAMAGE     = true,
     SHAKE_ON_HEAL       = true,
 
-    -- Circular ring spins with the shake, proportional to the damage
-    -- fraction of max HP. This value is the MAX rotation at 100% loss.
     SHAKE_ROTATE_CIRCULAR  = true,
     SHAKE_ROTATION_DEGREES = 8,
 
@@ -169,11 +151,8 @@ local DEFAULTS = {
     PULSE_HEAL_IN_DURATION = 0.35,
     PULSE_HEAL_OUT_DURATION = 0.70,
 
-    -- Progressive scale-up as HP drops
     LOWHP_SCALE_ENABLED      = true,
     LOWHP_SCALE_MAX          = 1.2,
-    -- If false, text labels get a counter-UIScale so they stay at their
-    -- base pixel size even when the bar/ring grows.
     LOWHP_SCALE_AFFECTS_TEXT = true,
 
     CIRCULAR_ENABLED      = true,
@@ -450,15 +429,11 @@ function SelfHealthbar:_buildUI()
     hud.Parent                 = root
     self._hud = hud
 
-    -- UIScale multiplies the entire HUD as a single value. Pulse and
-    -- low-HP scale both feed into this.
     local uiScale = Instance.new("UIScale")
     uiScale.Scale = 1.0
     uiScale.Parent = hud
     self._uiScale = uiScale
 
-    -- NumberValue drives the pulse multiplier so TweenService can animate
-    -- it without conflicting with the per-frame low-HP computation.
     local pulseVal = Instance.new("NumberValue")
     pulseVal.Name  = "PulseScale"
     pulseVal.Value = 1.0
@@ -507,7 +482,6 @@ function SelfHealthbar:_buildUI()
     textLabel.Parent                 = hud
     self._textLabel = textLabel
 
-    -- Counter-scale so text can stay fixed-size when HUD scales up
     local textCounter = Instance.new("UIScale")
     textCounter.Scale = 1
     textCounter.Parent = textLabel
@@ -560,8 +534,6 @@ function SelfHealthbar:_buildUI()
 
     self:_rebuildCircular()
 
-    -- ViewList is parented to ROOT, not HUD, so it escapes the CanvasGroup
-    -- clip. It gets its own CanvasGroup for opacity mirroring.
     local viewListContainer = Instance.new("CanvasGroup")
     viewListContainer.Name                   = "ViewList"
     viewListContainer.BackgroundTransparency = 1
@@ -578,6 +550,7 @@ function SelfHealthbar:_buildUI()
     emptyLabel.BackgroundTransparency = 1
     emptyLabel.AnchorPoint            = Vector2.new(0.5, 0)
     emptyLabel.Position               = UDim2.new(0.5, 0, 0, 0)
+    emptyLabel.Size                   = UDim.new(1, 0)
     emptyLabel.Size                   = UDim2.new(1, 0, 0, cfg.VIEWLIST_ROW_HEIGHT)
     emptyLabel.Font                   = Enum.Font.Gotham
     emptyLabel.TextScaled             = false
@@ -982,9 +955,6 @@ function SelfHealthbar:_triggerShake(deltaMagnitude, maxHP)
     )
     t1:Play()
 
-    -- Circular ring rotation scales with the fraction of max HP the event
-    -- represented. 10% damage → 10% of SHAKE_ROTATION_DEGREES. Many tiny
-    -- hits produce vibration; one big hit produces a single dramatic swing.
     if cfg.SHAKE_ROTATE_CIRCULAR
         and cfg.CIRCULAR_ENABLED
         and self._circular
@@ -1043,8 +1013,6 @@ function SelfHealthbar:_triggerPulse(delta, maxHP)
     local inDuration  = isDamage and cfg.PULSE_IN_DURATION  or cfg.PULSE_HEAL_IN_DURATION
     local outDuration = isDamage and cfg.PULSE_OUT_DURATION or cfg.PULSE_HEAL_OUT_DURATION
 
-    -- TweenService auto-cancels any tween targeting the same property on
-    -- the same instance, so back-to-back events compose cleanly.
     local inTween = TweenService:Create(
         self._pulseValue,
         TweenInfo.new(inDuration, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
@@ -1105,17 +1073,21 @@ function SelfHealthbar:_onHealthChanged(newHP, maxHP)
 end
 
 function SelfHealthbar:_hookCharacter(char)
+    if not char then return end
+    -- 🛠️ Prevent overlapping hooks
+    if self._character == char and self._humanoid and self._humanoid.Parent then return end
+
     if self._charConn then
         pcall(function() self._charConn:Disconnect() end)
         self._charConn = nil
     end
 
     self._character = char
-    local hum = char:WaitForChild("Humanoid", 10)
+    
+    -- 🛠️ Changed from WaitForChild to FindFirstChild to prevent yielding/race conditions
+    local hum = char:FindFirstChild("Humanoid")
     if not hum then
-        if self.config.DEBUG_HEALTH then
-            warn("[SelfHealthbar] No Humanoid found in character")
-        end
+        self._humanoid = nil
         return
     end
 
@@ -1361,23 +1333,24 @@ function SelfHealthbar:update()
     local now = os.clock()
     local hum = self._humanoid
     local cfg = self.config
-    
--- 🛠️ PATCHED: Re-hook character if missing or dead
-    if not hum or not hum.Parent or hum.Health <= 0 then
-        local myChar = LocalPlayer.Character
-        -- If we have a new character, hook it immediately
-        if myChar and myChar ~= self._character then
+
+    -- 🛠️ Rebuild UI if the game destroyed it (e.g., aggressive PlayerGui clearing)
+    if not self._gui or not self._gui.Parent then
+        if self._gui then pcall(function() self._gui:Destroy() end) end
+        self:_buildUI()
+        self:_recomputeBaseSize()
+    end
+
+    -- 🛠️ Robust character hooking: re-attempt if missing, dead, or changed
+    local myChar = LocalPlayer.Character
+    if myChar then
+        if myChar ~= self._character or not hum or not hum.Parent or hum.Health <= 0 then
             self:_hookCharacter(myChar)
-        else
-            self._hud.GroupTransparency = 1
-            if self._viewListContainer then
-                self._viewListContainer.GroupTransparency = 1
-            end
-            return
+            hum = self._humanoid -- Refresh local reference
         end
     end
-    
-    if not hum or hum.Health <= 0 then
+
+    if not hum or not hum.Parent or hum.Health <= 0 then
         self._hud.GroupTransparency = 1
         if self._viewListContainer then
             self._viewListContainer.GroupTransparency = 1
@@ -1519,7 +1492,6 @@ function SelfHealthbar:update()
     end
 
     -- Counter-scale text when user wants text at fixed size regardless
-    -- of the HUD's low-HP / pulse scaling.
     local counter = (cfg.LOWHP_SCALE_AFFECTS_TEXT == false)
         and (1 / math.max(combinedScale, 1e-3))
         or 1
