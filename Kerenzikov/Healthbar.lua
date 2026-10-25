@@ -219,7 +219,7 @@ local DEFAULTS = {
     VIEWLIST_EMPTY_TEXT  = "",
     VIEWLIST_EMPTY_COLOR = Color3.fromRGB(150, 150, 150),
 
-    KILL_KEYBIND    = Enum.KeyCode.K,
+    KILL_KEYBIND    = nil,
     UPDATE_INTERVAL = 0,
 }
 
@@ -1584,14 +1584,6 @@ function SelfHealthbar:start()
         self:_tick()
     end))
 
-    if self.config.KILL_KEYBIND then
-        self:_track(UserInputService.InputBegan:Connect(function(input, gp)
-            if gp then return end
-            if input.KeyCode == self.config.KILL_KEYBIND then
-                self:stop()
-            end
-        end))
-    end
 end
 
 function SelfHealthbar:stop()
