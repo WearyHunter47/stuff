@@ -1174,16 +1174,6 @@ function ESP:start()
     self:_track(Players.PlayerRemoving:Connect(function(player)
         self:_removeESP(player)
     end))
-
-    self:_track(UserInputService.InputBegan:Connect(function(input, gp)
-        if gp then return end
-        if UserInputService:GetFocusedTextBox() then return end
-        if input.KeyCode == Enum.KeyCode.L then
-            self._espVisible = not self._espVisible
-        elseif input.KeyCode == Enum.KeyCode.P then
-            self._textVisible = not self._textVisible
-        end
-    end))
 end
 
 function ESP:stop()
